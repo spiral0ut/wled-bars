@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WLED Bars – editor demo</title>
+<style>html,body{margin:0;background:#111318;min-height:100vh}</style>
+</head>
+<body>
+<!-- Standalone demo of the editor with a fake Home Assistant behind it.
+     Serve the repository root (python3 -m http.server) and open /demo/. -->
+<script type="module">
+import * as E from "../custom_components/wled_bars/frontend/engine.js";
+import "../custom_components/wled_bars/frontend/wled-bars.js";
+
+const LEDS = 60;
+const states = {
+  "sensor.printer_progress": { state: "0", attributes: { friendly_name: "Printer progress", unit_of_measurement: "%" } },
+  "sensor.living_room_temperature": { state: "21.4", attributes: { friendly_name: "Living room temperature" } },
+  "sensor.phone_battery": { state: "12", attributes: { friendly_name: "Phone battery" } },
+  "climate.living_room": { state: "heat", attributes: { friendly_name: "Thermostat", temperature: 22 } },
+  "input_number.target_temperature": { state: "22", attributes: { friendly_name: "Target temperature" } },
+  "timer.kitchen": { state: "idle", attributes: { friendly_name: "Kitchen timer" } },
+  "binary_sensor.printer_printing": { state: "on", attributes: { friendly_name: "Printer printing" } },
+};
+let bars = [
+  { id: "a1", name: "Print progress", start: 0, end: 27, source: { entity: "sensor.printer_progress" },
+    caps: { start: { count: 1, color: "#00c8ff", level: 30 }, end: { count: 1, color: "#7a5cff", level: 30 } },
+    animation: { type: "flow", period: 2.5, depth: 35, size: 8 }, on_complete: { effect: "rainbow", duration: 4, then: "hold" } },
+  { id: "b2", name: "Temperature", start: 59, end: 32, source: { entity: "sensor.living_room_temperature", min: 15, max: 30 },
+    color: { mode: "value", blend: true, stops: [{ pos: 0, color: "#2a6bff" }, { pos: 33, color: "#18e0c0" }, { pos: 66, color: "#ffd000" }, { pos: 100, color: "#ff2a2a" }] },
+    tip: { enabled: false }, track: { mode: "color", color: "#ffffff", level: 3 },
+    markers: [{ type: "entity", entity: "input_number.target_temperature", color: "#ffffff" }], smoothing: 2 },
+].map(E.normalizeBar);
+let settings = { enabled: true, brightness: 100, transport: "json", segment: 0, fps: 0, auto_power: true, idle: "release",
+  night: { mode: "off", start: "22:00", end: "07:00", entity: "", level: 20 } };
+let preview = null;
+const device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
+  segments: [{ id: 0, start: 0, stop: LEDS, name: "" }] };
+const listeners = new Set();
+const shown = {};
+const fullSince = {};
+
+setInterval(() => {
+  const t = performance.now() / 1000;
+  states["sensor.printer_progress"].state = String(Math.min(100, Math.round(((t % 40) / 30) * 1000) / 10));
+  states["sensor.living_room_temperature"].state = (22 + 5 * Math.sin(t / 7)).toFixed(1);
+}, 500);
+
+setInterval(() => {
+  const t = performance.now() / 1000;
+  const leds = new Array(LEDS).fill([0, 0, 0]);
+  const status = [];
+  const getState = (id) => (states[id] ? states[id].state : null);
+  const draw = (bar, frac, extra = {}) => {
+    const value = E.fracToValue(bar, frac);
+    const markers = bar.markers.map((m) => {
+      const mv = m.type === "entity" ? E.num(getState(m.entity), null) : E.num(m.value, null);
+      return mv === null ? null : E.valueToFrac(bar, mv);
+    });
+    const px = E.renderBar(bar, { t, frac, brightness: settings.brightness / 100, rule: E.pickRule(bar, value, frac * 100, getState), markers, ...extra });
+    E.barLeds(bar).forEach((idx, i) => { if (idx < LEDS) leds[idx] = px[i]; });
+  };
+  for (const bar of bars) {
+    const v = E.num(getState(bar.source.entity), null);
+    const ok = bar.source.type === "entity" && v !== null;
+    const target = ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
+    shown[bar.id] = shown[bar.id] === undefined ? target : shown[bar.id] + (target - shown[bar.id]) * 0.15;
+    if (target >= 1) fullSince[bar.id] = fullSince[bar.id] ?? t; else delete fullSince[bar.id];
+    const visible = settings.enabled && bar.enabled && !(preview && preview.bar.id === bar.id);
+    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: settings.enabled && bar.enabled });
+    if (visible) draw(bar, shown[bar.id], { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
+  }
+  if (preview) draw(preview.bar, preview.frac);
+  const hex = leds.map((p) => p.map((c) => c.toString(16).padStart(2, "0")).join("")).join("");
+  for (const cb of listeners) cb({ leds: hex, online: true, bars: status });
+}, 80);
+
+const hass = {
+  states,
+  async callWS(msg) {
+    const type = msg.type.split("/")[1];
+    if (type === "devices") return [device];
+    if (type === "get") return { device, bars, settings };
+    if (type === "save") {
+      if (msg.bars) bars = msg.bars.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
+      if (msg.settings) settings = msg.settings;
+      return { bars, settings };
+    }
+    if (type === "preview") { preview = msg.bar ? { bar: E.normalizeBar(msg.bar), frac: msg.frac ?? 0.5 } : null; return null; }
+    return null;
+  },
+  connection: {
+    async subscribeMessage(cb) { listeners.add(cb); return () => listeners.delete(cb); },
+  },
+};
+const panel = document.createElement("wled-bars-panel");
+document.body.append(panel);
+panel.hass = hass;
+window.__panel = panel;
+</script>
+</body>
+</html>

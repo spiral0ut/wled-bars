@@ -1,0 +1,21 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Connect a WLED device",
+        "description": "Enter the IP address or hostname of the WLED controller that should show bars.",
+        "data": { "host": "Host" }
+      },
+      "confirm": {
+        "title": "WLED Bars",
+        "description": "Use the WLED device **{name}** for progress and status bars?"
+      }
+    },
+    "error": { "cannot_connect": "Could not reach a WLED device at that address." },
+    "abort": {
+      "already_configured": "This WLED device is already set up.",
+      "cannot_connect": "Could not reach the WLED device."
+    }
+  }
+}

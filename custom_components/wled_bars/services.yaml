@@ -1,0 +1,53 @@
+start_timer:
+  name: Start bar timer
+  description: Start a countdown on a bar whose source is "Manual / automation". The bar fills over the duration.
+  fields:
+    bar:
+      name: Bar
+      description: Name or id of the bar.
+      required: true
+      selector:
+        text:
+    duration:
+      name: Duration
+      required: true
+      selector:
+        duration:
+stop_timer:
+  name: Stop bar timer
+  description: Stop a manual bar's timer and clear its value.
+  fields:
+    bar:
+      name: Bar
+      required: true
+      selector:
+        text:
+set_value:
+  name: Set bar value
+  description: Set the value of a bar whose source is "Manual / automation" (in the bar's own min/max units).
+  fields:
+    bar:
+      name: Bar
+      required: true
+      selector:
+        text:
+    value:
+      name: Value
+      required: true
+      selector:
+        number:
+          mode: box
+          step: any
+set_enabled:
+  name: Enable or disable a bar
+  fields:
+    bar:
+      name: Bar
+      required: true
+      selector:
+        text:
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
