@@ -1,7 +1,9 @@
 // WLED Bars frontend: the sidebar editor panel and the dashboard card.
 // Plain web components, no build step. The preview uses the same render
 // engine as the backend (engine.js mirrors engine.py).
-import * as E from "./engine.js";
+// Loaded with the same ?v= as this file so a new release never pairs with a
+// cached copy of the old engine.
+const E = await import("./engine.js" + new URL(import.meta.url).search);
 
 const DOMAIN = "wled_bars";
 
@@ -28,6 +30,112 @@ const hexToPixels = (hex) => {
     out.push([parseInt(hex.substr(i, 2), 16), parseInt(hex.substr(i + 2, 2), 16), parseInt(hex.substr(i + 4, 2), 16)]);
   }
   return out;
+};
+
+const hhmm = (min) => {
+  const m = ((Math.round(min) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
+const parseHM = (text) => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(text || ""));
+  return m ? (Number(m[1]) % 24) * 60 + (Number(m[2]) % 60) : null;
+};
+// Pointer drag that works with mouse and touch. onMove(event), onEnd().
+const dragHandle = (el, onStart, onMove, onEnd) => {
+  el.addEventListener("pointerdown", (down) => {
+    down.preventDefault();
+    down.stopPropagation();
+    el.setPointerCapture(down.pointerId);
+    const ctx = onStart ? onStart(down) : null;
+    const move = (e) => onMove(e, ctx, down);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      if (onEnd) onEnd();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  });
+};
+
+// ---------- "show only when" conditions (mirrors manager.py) ----------
+
+const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const NEW_CONDITION = {
+  time: () => ({ type: "time", start: "07:00", end: "09:00", days: [] }),
+  state: () => ({ type: "state", entity: "", states: "on", negate: false }),
+  numeric: () => ({ type: "numeric", entity: "", op: ">=", value: "0" }),
+};
+
+export function condOk(c, getState, date = new Date()) {
+  if (c.type === "time") {
+    const st = parseHM(c.start), en = parseHM(c.end);
+    const now = date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
+    let weekday = (date.getDay() + 6) % 7; // Monday = 0
+    let inside = true;
+    if (st !== null && en !== null && st !== en) {
+      const length = (((en - st) % 1440) + 1440) % 1440;
+      const elapsed = (((now - st) % 1440) + 1440) % 1440;
+      inside = elapsed <= length;
+      if (st > en && now < en) weekday = (weekday + 6) % 7;
+    }
+    if (Array.isArray(c.days) && c.days.length && !c.days.includes(weekday)) return false;
+    return inside;
+  }
+  if (!c.entity) return true;
+  const cur = getState(c.entity);
+  if (c.type === "state") {
+    const allowed = String(c.states || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+    if (!allowed.length) allowed.push("on");
+    const hit = cur !== null && cur !== undefined && allowed.includes(String(cur).toLowerCase());
+    return c.negate ? !hit : hit;
+  }
+  if (c.type === "numeric") return E.num(cur, null) !== null && E.compare(cur, c.op || ">=", c.value);
+  return true;
+}
+
+export function conditionsOk(vis, getState, date = new Date()) {
+  const list = (vis.conditions || []).filter((c) => c && typeof c === "object");
+  if (!list.length) return true;
+  return vis.match === "any" ? list.some((c) => condOk(c, getState, date)) : list.every((c) => condOk(c, getState, date));
+}
+
+const daysText = (days) => {
+  if (!Array.isArray(days) || !days.length || days.length === 7) return "";
+  const key = [...days].sort().join("");
+  if (key === "01234") return " weekdays";
+  if (key === "56") return " weekends";
+  return " " + [...days].sort().map((i) => DAY_NAMES[i]).join(" ");
+};
+const condText = (c) => {
+  if (c.type === "time") {
+    const all = parseHM(c.start) === parseHM(c.end);
+    return (all ? "all day" : `${c.start}–${c.end}`) + daysText(c.days);
+  }
+  if (!c.entity) return "";
+  if (c.type === "state") return `${c.entity} ${c.negate ? "is not" : "is"} ${c.states || "on"}`;
+  return `${c.entity} ${(OPS.find((o) => o[0] === c.op) || [0, c.op])[1]} ${c.value}`;
+};
+
+// ---------- bar kinds: what each preset needs ----------
+// sources: which "follows" choices make sense; hide: add-ons that don't apply;
+// range: how the empty/full mapping is presented.
+const KINDS = {
+  "": { sources: null, hide: [] },
+  progress: { sources: ["entity", "manual"], hide: ["peak"], range: "percent" },
+  temperature: { sources: ["entity"], hide: ["done", "peak"], range: "temp", noDrain: true },
+  battery: { sources: ["entity"], hide: ["done", "peak"], range: "percent", noDrain: true },
+  countdown: { sources: ["timer", "manual"], hide: ["peak", "markers"] },
+  finish: { sources: ["timestamp"], hide: ["peak", "markers"] },
+  day: { sources: ["window"], hide: ["done", "unavail", "peak", "markers"], noDrain: true },
+  level: { sources: ["entity", "manual"], hide: ["done"], range: "percent", noDrain: true },
+};
+const TEMP_PRESETS = {
+  F: [["Room", 60, 85], ["Outdoor", 0, 100], ["Fridge", 33, 45], ["Freezer", -10, 20]],
+  C: [["Room", 15, 30], ["Outdoor", -20, 40], ["Fridge", 0, 8], ["Freezer", -25, -5]],
 };
 
 // ---------- options ----------
@@ -59,7 +167,7 @@ const TEMPLATES = [
     icon: "🖨️", name: "Print / job progress",
     desc: "0–100 % sensor, glowing tip, rainbow when done.",
     bar: {
-      name: "Print progress",
+      name: "Print progress", kind: "progress",
       color: { mode: "gradient", stops: evenStops(["#00c8ff", "#7a5cff"]) },
       tip: { enabled: true, count: 1, effect: "pulse", period: 1.2, color: "#ffffff" },
       caps: { start: { count: 1, color: "#00c8ff", level: 30 }, end: { count: 1, color: "#7a5cff", level: 30 } },
@@ -70,15 +178,14 @@ const TEMPLATES = [
   },
   {
     icon: "🌡️", name: "Temperature gauge",
-    desc: "Whole bar changes colour with the value; marker for a setpoint.",
+    desc: "Whole bar changes colour from cold to hot.",
     bar: {
-      name: "Temperature",
+      name: "Temperature", kind: "temperature",
       source: { type: "entity", min: 15, max: 30 },
       color: { mode: "value", blend: true, stops: evenStops(["#2a6bff", "#18e0c0", "#ffd000", "#ff2a2a"]) },
       tip: { enabled: false },
       track: { mode: "color", color: "#ffffff", level: 3 },
       ticks: { every: 25, color: "#303030" },
-      markers: [{ type: "value", value: 21, color: "#ffffff" }],
       smoothing: 2,
       unavailable: { mode: "show", color: "#ff3030" },
     },
@@ -87,7 +194,7 @@ const TEMPLATES = [
     icon: "🔋", name: "Battery level",
     desc: "Red → green zones, blinks red when low.",
     bar: {
-      name: "Battery",
+      name: "Battery", kind: "battery",
       color: { mode: "steps", stops: [{ pos: 0, color: "#ff2a2a" }, { pos: 20, color: "#ff9a00" }, { pos: 50, color: "#18e060" }] },
       tip: { enabled: false },
       rules: [{ source: "percent", op: "<", value: "15", color: "#ff0000", use_color: true, effect: "blink", period: 1, scope: "fill" }],
@@ -97,7 +204,7 @@ const TEMPLATES = [
     icon: "⏲️", name: "Countdown timer",
     desc: "Drains as a timer helper runs down; flashes when finished.",
     bar: {
-      name: "Timer",
+      name: "Timer", kind: "countdown",
       source: { type: "timer", invert: true },
       color: { mode: "value", blend: true, stops: evenStops(["#ff2a2a", "#ffd000", "#18e060"]) },
       tip: { enabled: true, count: 1, effect: "blink", period: 1, color: "#ffffff", off: "under" },
@@ -109,7 +216,7 @@ const TEMPLATES = [
     icon: "🧺", name: "Finishes at… (washer, dryer, oven)",
     desc: "Fills until a timestamp sensor's finish time.",
     bar: {
-      name: "Laundry",
+      name: "Laundry", kind: "finish",
       source: { type: "timestamp", duration: 0 },
       color: { mode: "gradient", stops: evenStops(["#18e0a0", "#b8ff5a"]) },
       tip: { enabled: true, count: 2, effect: "pulse", period: 1.5, taper: true },
@@ -120,7 +227,7 @@ const TEMPLATES = [
     icon: "☀️", name: "Day progress",
     desc: "Fills through a daily time window, with hour ticks.",
     bar: {
-      name: "Day",
+      name: "Day", kind: "day",
       source: { type: "window", window_start: "07:00", window_end: "23:00" },
       color: { mode: "gradient", span: "bar", stops: evenStops(["#ffc93a", "#ff5e3a", "#7a5cff"]) },
       tip: { enabled: true, count: 1, effect: "pulse", period: 3 },
@@ -132,7 +239,7 @@ const TEMPLATES = [
     icon: "📶", name: "Level meter (from centre)",
     desc: "Grows outward from the middle, with peak hold.",
     bar: {
-      name: "Level",
+      name: "Level", kind: "level",
       fill_from: "center",
       color: { mode: "steps", stops: [{ pos: 0, color: "#18e060" }, { pos: 60, color: "#ffd000" }, { pos: 85, color: "#ff2a2a" }] },
       tip: { enabled: false },
@@ -169,9 +276,10 @@ const ADDONS = [
     add: (d) => { d.on_complete.effect = "flash"; }, remove: (d) => { d.on_complete.effect = "none"; d.on_complete.then = "hold"; } },
   { id: "unavail", icon: "🚫", title: "Offline warning", hint: "Pulse a warning colour when the source is unavailable",
     active: (d) => d.unavailable.mode === "show", add: (d) => { d.unavailable.mode = "show"; }, remove: (d) => { d.unavailable.mode = "hide"; } },
-  { id: "vis", icon: "👁️", title: "Show only when…", hint: "Tie the bar to a schedule, a status or another entity",
-    active: (d) => !!d.visibility.entity || !!d.visibility.hide_at_zero || !d.visibility.hide_when_idle,
-    add: () => {}, remove: (d) => { Object.assign(d.visibility, { entity: "", states: "", hide_at_zero: false, hide_when_idle: true }); } },
+  { id: "vis", icon: "👁️", title: "Show only when…", hint: "Times of day, days of the week, or what another entity is doing",
+    active: (d) => d.visibility.conditions.length > 0 || !!d.visibility.hide_at_zero || !d.visibility.hide_when_idle,
+    add: (d) => { if (!d.visibility.conditions.length) d.visibility.conditions.push(NEW_CONDITION.time()); },
+    remove: (d) => { Object.assign(d.visibility, { entity: "", states: "", hide_at_zero: false, hide_when_idle: true, match: "all", conditions: [] }); } },
   { id: "fill", icon: "↔️", title: "Fill direction & smoothing", hint: "Grow from the centre or both ends; glide speed",
     active: (d) => d.fill_from !== "start" || !d.subpixel || Number(d.smoothing) !== E.DEFAULT_BAR.smoothing,
     add: () => {}, remove: (d) => { d.fill_from = "start"; d.subpixel = true; d.smoothing = E.DEFAULT_BAR.smoothing; } },
@@ -398,6 +506,39 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .add .ic{font-size:20px;flex:none;width:26px;text-align:center}
 .add b{display:block;font-weight:600}
 .add small{display:block;color:var(--wb-dim);font-size:11.5px;line-height:1.3;margin-top:2px}
+.map{grid-column:1/-1;position:relative;height:74px;touch-action:none;user-select:none;margin:0 14px}
+.map .tr{position:absolute;left:-14px;right:-14px;top:32px;height:10px;border-radius:6px;background:var(--wb-stage);border:1px solid var(--wb-line)}
+.map .fl{position:absolute;top:32px;height:10px;border-radius:6px}
+.map .hd{position:absolute;top:22px;width:28px;height:30px;margin-left:-14px;cursor:grab;display:grid;place-items:center;z-index:2}
+.map .hd::after{content:"";width:16px;height:26px;border-radius:8px;background:#fff;border:2px solid var(--wb-accent);box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.map .hd:active{cursor:grabbing}
+.map .lb{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
+.map .lb b{color:var(--primary-text-color,#e6e9ef)}
+.map .now{position:absolute;top:28px;width:2px;height:18px;margin-left:-1px;background:#fff;opacity:.9;z-index:1}
+.map .nl{position:absolute;top:56px;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
+.tb{position:relative;height:40px;touch-action:none;user-select:none;margin:0 14px;flex:1 1 100%}
+.tb .tr{position:absolute;left:0;right:0;top:8px;height:22px;border-radius:7px;background:var(--wb-stage);border:1px solid var(--wb-line);
+  background-image:repeating-linear-gradient(90deg,transparent 0,transparent calc(25% - 1px),var(--wb-line) calc(25% - 1px),var(--wb-line) 25%)}
+.tb .fl{position:absolute;top:8px;height:22px;background:color-mix(in srgb,var(--wb-accent) 55%,transparent);cursor:grab}
+.tb .hd{position:absolute;top:2px;width:28px;height:34px;margin-left:-14px;cursor:ew-resize;display:grid;place-items:center;z-index:2}
+.tb .hd::after{content:"";width:8px;height:30px;border-radius:5px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.tb .now{position:absolute;top:4px;width:2px;height:30px;margin-left:-1px;background:#ffd24d;z-index:1;pointer-events:none}
+.tbx{display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);margin:0 6px;flex:1 1 100%}
+.cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;border:1px solid var(--wb-line);border-radius:12px}
+.cond .ttl{font-weight:600;display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.dot{width:9px;height:9px;border-radius:50%;background:rgba(128,128,128,.5);flex:none}
+.dot.yes{background:#3dff8b;box-shadow:0 0 6px rgba(61,255,139,.6)}
+.days{display:flex;gap:4px}
+.day{width:28px;height:28px;border-radius:50%;border:1px solid var(--wb-line);background:transparent;cursor:pointer;font-size:12px;padding:0}
+.day.on{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff;font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--wb-line);border-radius:9px;overflow:hidden}
+.seg button{border:0;background:transparent;padding:5px 10px;cursor:pointer;font-size:12.5px}
+.seg button.on{background:var(--wb-accent);color:#fff}
+.link{border:0;background:none;color:var(--wb-accent);cursor:pointer;padding:0;font-size:12.5px;text-decoration:underline}
+.bar[draggable=true]{cursor:default}
+.bar.dragging{opacity:.4}
+.bar.over{outline:2px dashed var(--wb-accent);outline-offset:2px}
+.grip{cursor:grab;color:var(--wb-dim);font-size:16px;line-height:1;padding:0 2px;user-select:none}
 .empty{text-align:center;padding:28px 12px}
 .banner{background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.4);border-radius:10px;padding:8px 12px}
 dialog{background:var(--wb-card);color:inherit;border:1px solid var(--wb-line);border-radius:16px;padding:0;max-width:min(620px,94vw);width:100%}
@@ -620,17 +761,25 @@ class WledBarsPanel extends HTMLElement {
     const pill = h("span", { class: "pill" }, "…");
     strip.pctEl = pct;
     strip.pillEl = pill;
-    return h("div", { class: "bar" + (bar.enabled ? "" : " off") },
+    const when = bar.visibility.conditions.map(condText).filter(Boolean).join(bar.visibility.match === "any" ? "  or  " : "  and  ");
+    const card = h("div", { class: "bar" + (bar.enabled ? "" : " off"), draggable: true,
+      ondragstart: (e) => { this._dragFrom = i; card.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); },
+      ondragend: () => { card.classList.remove("dragging"); this._dragFrom = -1; },
+      ondragover: (e) => { if (this._dragFrom >= 0 && this._dragFrom !== i) { e.preventDefault(); card.classList.add("over"); } },
+      ondragleave: () => card.classList.remove("over"),
+      ondrop: (e) => { e.preventDefault(); card.classList.remove("over"); this._move(this._dragFrom, i); } },
       h("div", { class: "rowx" },
+        h("span", { class: "grip", title: "Drag to reorder. Where bars share LEDs, the one further down the list is drawn on top." }, "⠿"),
         h("span", { style: `width:10px;height:10px;border-radius:50%;background:${this._barColor(i)}` }),
         h("div", { class: "grow name" }, bar.name), pill, pct),
       h("div", { class: "stage", style: "padding:8px 8px 2px" }, canvas),
       h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
         `LED ${bar.start} → ${bar.end} · ${this._sourceText(bar)}`),
+      when && h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, `🕒 Only ${when}`),
       h("div", { class: "rowx" },
         h("button", { class: "btn pri", onclick: () => this._edit(i) }, "Edit"),
-        h("button", { class: "btn", onclick: () => this._duplicate(i) }, "Duplicate"),
-        h("button", { class: "btn danger", onclick: () => this._delete(i) }, "Delete"),
+        h("button", { class: "btn xs", onclick: () => this._duplicate(i) }, "Duplicate"),
+        this._confirmBtn("Delete", "Tap again to delete", "btn xs danger", () => this._delete(i)),
         h("span", { class: "grow" }),
         h("input", { type: "checkbox", class: "sw", title: "Enabled", checked: !!bar.enabled,
           onchange: async (e) => {
@@ -640,6 +789,7 @@ class WledBarsPanel extends HTMLElement {
             this._render();
           } }))
     );
+    return card;
   }
 
   _newBar(tpl) {
@@ -649,12 +799,19 @@ class WledBarsPanel extends HTMLElement {
     if (used < 0) start = 0;
     const end = Math.min(count - 1, start + 29);
     this._draft = E.normalizeBar({ ...clone(tpl.bar), start, end, id: "" });
+    if (this._draft.kind === "temperature" && this._tempUnit(this._draft) === "F") Object.assign(this._draft.source, { min: 60, max: 85 });
     this._draftIndex = -1;
     this._openEditor();
   }
 
   _edit(i) {
     this._draft = E.normalizeBar(clone(this._bars[i]));
+    const vis = this._draft.visibility;
+    if (vis.entity) {
+      vis.conditions.unshift({ type: "state", entity: vis.entity, states: vis.states || "on", negate: false });
+      vis.entity = "";
+      vis.states = "";
+    }
     this._draftIndex = i;
     this._openEditor();
   }
@@ -664,6 +821,7 @@ class WledBarsPanel extends HTMLElement {
     this._sim = { frac: 0.62, play: false, live: true, t0: 0, completeAt: null, unavailable: false };
     this._closed = new Set();
     this._added = new Set();
+    this._showRange = false;
     this._render();
     window.scrollTo?.(0, 0);
   }
@@ -678,8 +836,46 @@ class WledBarsPanel extends HTMLElement {
     this._render();
   }
 
+  // Two-step button: the first click arms it, the second confirms. Avoids
+  // window.confirm(), which some app webviews silently block.
+  _confirmBtn(label, armedLabel, cls, action) {
+    let timer = 0;
+    const btn = h("button", { class: cls, onclick: (e) => {
+      e.preventDefault();
+      if (btn.dataset.armed) { clearTimeout(timer); action(); return; }
+      btn.dataset.armed = "1";
+      btn.textContent = armedLabel;
+      btn.style.borderColor = "#ff5d5d";
+      btn.style.color = "#ff5d5d";
+      timer = setTimeout(() => { delete btn.dataset.armed; btn.textContent = label; btn.style.borderColor = ""; btn.style.color = ""; }, 4000);
+    } }, label);
+    return btn;
+  }
+
+  async _move(from, to) {
+    if (from === to || from < 0 || to < 0) return;
+    const bars = clone(this._bars);
+    const [item] = bars.splice(from, 1);
+    bars.splice(to, 0, item);
+    await this._saveBars(bars);
+    this._render();
+  }
+
+  _kind(d) {
+    if (d.kind && KINDS[d.kind]) return d.kind;
+    // bars made before kinds existed: recognise the obvious ones from the entity
+    const st = d.source.type === "entity" && this._hass?.states?.[d.source.entity];
+    const dc = st && !d.source.attribute ? st.attributes?.device_class : "";
+    return dc === "temperature" || dc === "battery" ? dc : "";
+  }
+
+  _tempUnit(d) {
+    const st = this._hass?.states?.[d.source.entity];
+    const unit = (!d.source.attribute && st?.attributes?.unit_of_measurement) || this._hass?.config?.unit_system?.temperature || "°C";
+    return /F/i.test(unit) ? "F" : "C";
+  }
+
   async _delete(i) {
-    if (!confirm(`Delete the bar "${this._bars[i].name}"?`)) return;
     const bars = clone(this._bars);
     bars.splice(i, 1);
     await this._saveBars(bars);
@@ -703,11 +899,13 @@ class WledBarsPanel extends HTMLElement {
     this._playBtn = h("button", { class: "btn", onclick: () => {
       this._sim.play = !this._sim.play; this._sim.live = false; this._sim.t0 = 0; this._sim.completeAt = null; this._sim.unavailable = false; this._syncSimButtons();
     } }, "▶ Play");
-    this._liveBtn = h("button", { class: "btn xs", title: "Make the preview follow the entity's real value",
-      onclick: () => { this._sim.live = !this._sim.live; this._sim.play = false; this._sim.unavailable = false; this._sim.completeAt = null; this._syncSimButtons(); } }, "● Live value");
+    this._liveBtn = h("button", { class: "btn xs", title: "Make the preview follow the entity's real value again",
+      onclick: () => { this._sim.live = true; this._sim.play = false; this._sim.unavailable = false; this._sim.completeAt = null; this._syncSimButtons(); } }, "↺ Back to live value");
+    this._doneBtn = h("button", { class: "btn xs", title: "Preview the finish celebration",
+      onclick: () => { this._sim.play = false; this._sim.live = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, "🎉 Test finish");
     this._stripBtn = h("button", { class: "btn", title: "Show this draft on the real LEDs while you edit",
       onclick: () => this._stripPreview(!this._onStrip) }, "💡 Show on strip");
-    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, "Unavailable");
+    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, "🚫 Test offline");
 
     const head = h("div", { class: "sticky" },
       h("div", { class: "rowx", style: "margin-bottom:10px" },
@@ -721,10 +919,7 @@ class WledBarsPanel extends HTMLElement {
       h("div", { class: "sim" },
         this._playBtn, h("span", { class: "dim sm" }, "Simulate"), this._simRange, this._simOut),
       h("div", { class: "sim", style: "margin-top:6px" },
-        this._stripBtn, this._liveBtn,
-        h("button", { class: "btn xs", onclick: () => { this._sim.play = false; this._sim.live = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, "🎉 Test completion"),
-        this._unavBtn,
-        h("button", { class: "btn xs", onclick: () => this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }) }, "🔦 Flash these LEDs"))
+        this._stripBtn, this._liveBtn, this._doneBtn, this._unavBtn)
     );
     this._form = h("div", { class: "editor" });
     this._lists = h("div", { style: "display:none" });
@@ -739,8 +934,13 @@ class WledBarsPanel extends HTMLElement {
     this._playBtn.classList.toggle("on", this._sim.play);
     this._unavBtn.classList.toggle("on", this._sim.unavailable);
     this._stripBtn.classList.toggle("on", this._onStrip);
-    this._liveBtn.classList.toggle("on", this._sim.live);
-    this._liveBtn.style.display = this._draft && this._draft.source.type === "entity" ? "" : "none";
+    const d = this._draft;
+    if (!d) return;
+    const on = (id) => ADDONS.find((a) => a.id === id).active(d) || this._added.has(id);
+    this._liveBtn.style.display = !this._sim.live && this._liveValue(E.normalizeBar(d)) !== null ? "" : "none";
+    this._doneBtn.style.display = on("done") ? "" : "none";
+    this._unavBtn.style.display = on("unavail") ? "" : "none";
+    if (!on("unavail") && this._sim.unavailable) this._sim.unavailable = false;
   }
 
   _closeEditor() {
@@ -825,7 +1025,8 @@ class WledBarsPanel extends HTMLElement {
     if (type === "time") return h("input", { type: "time", value: obj[key], oninput: (e) => upd(e.target.value) });
     if (type === "entity")
       return h("input", { type: "text", list: this._datalist(o.domains), value: obj[key] ?? "", placeholder: o.placeholder || "Start typing an entity…",
-        oninput: (e) => upd(e.target.value.trim()) });
+        oninput: (e) => upd(e.target.value.trim()),
+        onchange: () => { if (o.rerender) this._touch(true); } });
     return h("input", { type: "text", value: obj[key] ?? "", placeholder: o.placeholder, oninput: (e) => upd(e.target.value) });
   }
 
@@ -854,6 +1055,156 @@ class WledBarsPanel extends HTMLElement {
     return el;
   }
 
+  // Draggable scale: two handles (empty / full) and a line for the current reading.
+  _rangeMap(d, deg, fixedStep) {
+    const s = d.source;
+    const lo0 = E.num(s.min, 0), hi0 = E.num(s.max, 100);
+    const a = Math.min(lo0, hi0), b = Math.max(lo0, hi0);
+    const span = b - a || 10;
+    const live0 = this._liveValue(E.normalizeBar(d));
+    let sLo = a - span * 0.5, sHi = b + span * 0.5;
+    if (live0 !== null) { sLo = Math.min(sLo, live0 - span * 0.15); sHi = Math.max(sHi, live0 + span * 0.15); }
+    if (a >= 0 && b <= 100 && (live0 === null || (live0 >= 0 && live0 <= 100)) && span >= 40) { sLo = 0; sHi = 100; }
+    const raw = span / 30;
+    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = fixedStep || Math.max(0.1, pow * (raw / pow >= 5 ? 5 : raw / pow >= 2 ? 2 : 1));
+    const snap = (x) => Math.round(Math.round(x / step) * step * 100) / 100;
+    const pos = (x) => `${E.clamp((x - sLo) / (sHi - sLo)) * 100}%`;
+    const fill = h("div", { class: "fl" });
+    const hLo = h("div", { class: "hd", title: "Empty" }), hHi = h("div", { class: "hd", title: "Full" });
+    const lLo = h("div", { class: "lb" }), lHi = h("div", { class: "lb" });
+    const now = h("div", { class: "now" }), nowL = h("div", { class: "nl" });
+    const el = h("div", { class: "map" }, h("div", { class: "tr" }), fill, now, nowL, lLo, lHi, hLo, hHi);
+    const paint = () => {
+      const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
+      const st = E.normalizeBar(d).color.stops;
+      const cols = d.color.mode === "rainbow" ? ["red", "yellow", "lime", "cyan", "blue", "magenta"] : d.color.mode === "solid" ? [st[0].color, st[0].color] : st.map((x) => x.color);
+      if (cols.length === 1) cols.push(cols[0]);
+      const left = Math.min(lo, hi), right = Math.max(lo, hi);
+      fill.style.left = pos(left);
+      fill.style.width = `${(E.clamp((right - sLo) / (sHi - sLo)) - E.clamp((left - sLo) / (sHi - sLo))) * 100}%`;
+      fill.style.background = `linear-gradient(${lo <= hi ? 90 : 270}deg,${cols.join(",")})`;
+      hLo.style.left = lLo.style.left = pos(lo);
+      hHi.style.left = lHi.style.left = pos(hi);
+      lLo.innerHTML = ""; lLo.append("Empty ", h("b", {}, `${fmt(lo)}${deg}`));
+      lHi.innerHTML = ""; lHi.append("Full ", h("b", {}, `${fmt(hi)}${deg}`));
+      const v = this._liveValue(E.normalizeBar(d));
+      now.style.display = nowL.style.display = v === null ? "none" : "";
+      if (v !== null) { now.style.left = nowL.style.left = pos(v); nowL.textContent = `now ${fmt(v)}${deg}`; }
+    };
+    const toValue = (e) => {
+      const r = el.getBoundingClientRect();
+      return snap(sLo + E.clamp((e.clientX - r.left) / r.width) * (sHi - sLo));
+    };
+    const wire = (handle, key) => dragHandle(handle, null,
+      (e) => { s[key] = toValue(e); paint(); for (const fn of this._hooks) fn(); },
+      () => this._touch(true));
+    wire(hLo, "min");
+    wire(hHi, "max");
+    paint();
+    return { el, paint };
+  }
+
+  // 24-hour bar with draggable start/end; the block itself can be dragged too.
+  _timeBar(c) {
+    const fillA = h("div", { class: "fl" }), fillB = h("div", { class: "fl" });
+    const hS = h("div", { class: "hd", title: "Start" }), hE = h("div", { class: "hd", title: "End" });
+    const now = h("div", { class: "now", title: "Now" });
+    const el = h("div", { class: "tb" }, h("div", { class: "tr" }), fillA, fillB, now, hS, hE);
+    const label = h("b", {});
+    const pct = (m) => `${(m / 1440) * 100}%`;
+    const paint = () => {
+      const st = parseHM(c.start) ?? 0;
+      let en = parseHM(c.end) ?? 0;
+      if (en === 0) en = 1440;
+      const allDay = st === en % 1440;
+      const wrap = !allDay && st > en;
+      fillA.style.left = allDay ? "0" : pct(st);
+      fillA.style.width = allDay ? "100%" : pct((wrap ? 1440 : en) - st);
+      fillA.style.borderRadius = wrap ? "7px 0 0 7px" : "7px";
+      fillB.style.display = wrap ? "" : "none";
+      fillB.style.left = "0";
+      fillB.style.width = pct(en);
+      fillB.style.borderRadius = "0 7px 7px 0";
+      hS.style.left = pct(st);
+      hE.style.left = pct(en);
+      const d = new Date();
+      now.style.left = pct(d.getHours() * 60 + d.getMinutes());
+      label.textContent = allDay ? "All day" : `${c.start} – ${c.end}${wrap ? " (overnight)" : ""}`;
+    };
+    const toMin = (e) => {
+      const r = el.getBoundingClientRect();
+      return Math.round((E.clamp((e.clientX - r.left) / r.width) * 1440) / 15) * 15;
+    };
+    dragHandle(hS, null, (e) => { c.start = hhmm(Math.min(toMin(e), 1425)); paint(); });
+    dragHandle(hE, null, (e) => { c.end = hhmm(toMin(e)); paint(); });
+    for (const f of [fillA, fillB]) {
+      dragHandle(f, (e) => ({ at: toMin(e), st: parseHM(c.start) ?? 0, en: parseHM(c.end) ?? 0 }),
+        (e, ctx) => { const delta = toMin(e) - ctx.at; c.start = hhmm(ctx.st + delta); c.end = hhmm(ctx.en + delta); paint(); });
+    }
+    paint();
+    return { el, label, paint };
+  }
+
+  _conditionBuilder(v) {
+    const I = (obj, key, type, o) => this._in(obj, key, type, o);
+    const getState = (id) => this._hass?.states?.[id]?.state ?? null;
+    const list = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
+    v.conditions.forEach((c, i) => {
+      const dot = h("span", { class: "dot" });
+      this._condDots.push(() => {
+        const ok = condOk(c, getState);
+        dot.classList.toggle("yes", ok);
+        dot.title = ok ? "True right now" : "Not true right now";
+      });
+      const remove = h("button", { class: "btn xs danger", title: "Remove this condition",
+        onclick: (e) => { e.preventDefault(); v.conditions.splice(i, 1); this._touch(true); } }, "✕");
+      if (c.type === "time") {
+        if (!Array.isArray(c.days)) c.days = [];
+        const tb = this._timeBar(c);
+        const days = h("div", { class: "days" }, DAY_LETTERS.map((letter, day) => {
+          const on = () => !c.days.length || c.days.includes(day);
+          const btn = h("button", { class: "day" + (on() ? " on" : ""), title: DAY_NAMES[day], onclick: (e) => {
+            e.preventDefault();
+            const set = new Set(c.days.length ? c.days : [0, 1, 2, 3, 4, 5, 6]);
+            if (set.has(day)) set.delete(day); else set.add(day);
+            c.days = set.size === 7 || set.size === 0 ? [] : [...set].sort();
+            this._touch(true);
+          } }, letter);
+          return btn;
+        }));
+        list.append(h("div", { class: "cond" },
+          h("span", { class: "ttl" }, dot, "🕒 ", tb.label), days, remove,
+          tb.el, h("div", { class: "tbx" }, ["00", "06", "12", "18", "24"].map((x) => h("span", {}, x)))));
+      } else if (c.type === "state") {
+        list.append(h("div", { class: "cond" },
+          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, "🔘"),
+          h("span", { class: "grow", style: "display:flex;min-width:160px" }, I(c, "entity", "entity", {})),
+          h("select", { onchange: (e) => { c.negate = e.target.value === "1"; this._touch(false); } },
+            h("option", { value: "0", selected: !c.negate }, "is"), h("option", { value: "1", selected: !!c.negate }, "is not")),
+          h("span", { style: "width:120px;display:flex" }, I(c, "states", "text", { placeholder: "on, home" })),
+          remove));
+      } else {
+        list.append(h("div", { class: "cond" },
+          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, "🔢"),
+          h("span", { class: "grow", style: "display:flex;min-width:160px" }, I(c, "entity", "entity", { domains: ["sensor", "number", "input_number", "counter"] })),
+          I(c, "op", "sel", { options: OPS.slice(0, 4) }),
+          h("span", { style: "width:90px;display:flex" }, I(c, "value", "text", { placeholder: "value" })),
+          remove));
+      }
+    });
+    const add = (type, label) => h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); v.conditions.push(NEW_CONDITION[type]()); this._touch(true); } }, label);
+    return [
+      v.conditions.length > 1 && h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Show when"),
+        h("span", { class: "seg" },
+          h("button", { class: v.match !== "any" ? "on" : "", onclick: (e) => { e.preventDefault(); v.match = "all"; this._touch(true); } }, "all of these are true"),
+          h("button", { class: v.match === "any" ? "on" : "", onclick: (e) => { e.preventDefault(); v.match = "any"; this._touch(true); } }, "any of these is true"))),
+      list,
+      h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Add:"), add("time", "🕒 Time of day"), add("state", "🔘 Entity state"), add("numeric", "🔢 Number")),
+      h("div", { class: "dim sm full" }, "Drag the ends of a time block, or the block itself. The dot is green when a condition is true right now. To show different bars on the same LEDs at different times, duplicate a bar and give each its own times."),
+    ];
+  }
+
   _liveValue(bar) {
     const s = bar.source;
     if (s.type !== "entity" || !s.entity) return null;
@@ -875,6 +1226,7 @@ class WledBarsPanel extends HTMLElement {
     this._lists.innerHTML = "";
     this._hooks = [];
     this._rangeInfo = null;
+    this._condDots = [];
     const I = (obj, key, type, o) => this._in(obj, key, type, o);
     const F = (...a) => this._f(...a);
     const effect = (obj) => [
@@ -896,50 +1248,81 @@ class WledBarsPanel extends HTMLElement {
       h("div", { class: "stage full" }, pick), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
       F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 }), "Lower than the start = runs backwards"),
-      h("div", { class: "full" }, h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction")),
+      h("div", { class: "rowx full" },
+        h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction"),
+        h("button", { class: "btn", title: "Blink this range on the real strip so you can find it",
+          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, "🔦 Find on strip")),
     ]));
 
     // --- 2. what it shows ---
     const s = d.source;
+    const kindId = this._kind(d);
+    const kind = KINDS[kindId];
     const numeric = s.type === "entity" || s.type === "manual";
-    const rangeInfo = h("div", { class: "info" });
-    if (numeric) {
+    const sourceTypes = kind.sources ? SOURCE_TYPES.filter((x) => kind.sources.includes(x[0]) || x[0] === s.type) : SOURCE_TYPES;
+    const isTemp = kind.range === "temp";
+    const deg = isTemp ? "°" : "";
+    const needsAttr = s.type === "entity" && (!!s.attribute || (!!s.entity && !/^(sensor|number|input_number|counter)\./.test(s.entity)));
+    // 0–100 sources don't need a range unless the user asks for one
+    const plainPercent = kind.range === "percent" && Number(s.min) === 0 && Number(s.max) === 100 && !this._showRange;
+    const rangeNow = h("div", { class: "dim sm full" });
+    let rangeMap = null;
+    if (numeric && !plainPercent) {
+      rangeMap = this._rangeMap(d, deg, isTemp ? (this._tempUnit(d) === "F" ? 1 : 0.5) : 0);
       let last = "";
       this._rangeInfo = () => {
         const bar = E.normalizeBar(d);
-        const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
-        const unit = this._liveUnit(bar);
         const v = this._liveValue(bar);
-        const len = Math.abs(d.end - d.start) + 1;
-        let text;
-        if (lo === hi) text = "Empty and full are the same number, so the bar can't fill. Make them different.";
-        else {
-          text = v !== null
-            ? `Right now ${s.entity} reads ${fmt(v)}${unit}, which lights ${fmt(E.valueToFrac(bar, v) * 100)} % of the bar (about ${Math.round(E.valueToFrac(bar, v) * len)} of ${len} LEDs). `
-            : "";
-          text += `The bar is empty at ${fmt(lo)}${unit} and completely lit at ${fmt(hi)}${unit}; halfway is ${fmt((lo + hi) / 2)}${unit}.`;
-          if (lo > hi) text += " Empty is the higher number, so the bar grows as the reading falls.";
-        }
-        if (text !== last) { last = text; rangeInfo.textContent = text; }
+        const unit = deg || this._liveUnit(bar);
+        const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
+        let text = "";
+        if (lo === hi) text = "Empty and full are the same number, so the bar can't fill. Drag one of the handles.";
+        else if (v !== null) text = `${fmt(v)}${unit} right now lights ${fmt(E.valueToFrac(bar, v) * 100)} % of the bar.`;
+        if (lo > hi) text += " Empty is the higher number, so the bar grows as the reading falls.";
+        if (text !== last) { last = text; rangeNow.textContent = text; }
+        rangeMap.paint();
       };
     }
-    form.append(this._card("2", "What it shows", null, [
-      F("Follows", I(s, "type", "sel", { options: SOURCE_TYPES }), null, "full"),
-      s.type === "entity" && F("Entity", I(s, "entity", "entity", { domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] })),
-      s.type === "entity" && F("Attribute", I(s, "attribute", "text", { placeholder: "(state)" }), "Optional, e.g. current_temperature"),
-      s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"] })),
+    const setRange = (lo, hi) => { s.min = lo; s.max = hi; this._touch(true); };
+    const live = this._liveValue(E.normalizeBar(d));
+    const presets = [];
+    if (numeric && !plainPercent) {
+      if (isTemp) {
+        const unit = this._tempUnit(d);
+        for (const [name, lo, hi] of TEMP_PRESETS[unit]) presets.push([`${name} ${lo}–${hi}°`, lo, hi]);
+        if (live !== null) {
+          const half = unit === "F" ? 10 : 5;
+          presets.push([`Around now ±${half}°`, Math.round(live) - half, Math.round(live) + half]);
+        }
+      } else if (!(Number(s.min) === 0 && Number(s.max) === 100)) presets.push(["0–100", 0, 100]);
+    }
+    form.append(this._card("2", isTemp ? "Which temperature" : "What it shows", null, [
+      sourceTypes.length > 1 && F("Follows", I(s, "type", "sel", { options: sourceTypes }), null, "full"),
+      s.type === "entity" && F(isTemp ? "Temperature sensor" : "Entity", I(s, "entity", "entity", { rerender: true, domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] }),
+        null, "full"),
+      needsAttr && F("Attribute", I(s, "attribute", "text", { placeholder: "(state)" }), "e.g. current_temperature", "full"),
+      s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"] }), null, "full"),
       s.type === "timestamp" && F("Finish time entity", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"] }), "A timestamp, e.g. washer end time"),
       s.type === "timestamp" && F("Start time entity", I(s, "start_entity", "entity", { domains: ["sensor", "input_datetime"] }), "Optional"),
       s.type === "timestamp" && F("Typical length (s)", I(s, "duration", "num", { min: 0, step: 60 }), "Used without a start entity. 0 = count from when the finish time appeared"),
       s.type === "window" && F("Starts at", I(s, "window_start", "time")),
       s.type === "window" && F("Ends at", I(s, "window_end", "time")),
       s.type === "manual" && h("div", { class: "dim sm full" },
-        "Drive this bar from automations: wled_bars.start_timer (bar, duration), wled_bars.set_value (bar, value), wled_bars.stop_timer."),
-      numeric && h("div", { class: "sub" }, "Range – which readings mean empty and full"),
-      numeric && F("Reading for an empty bar", I(s, "min", "num", { step: "any" }), "At or below this, nothing is lit"),
-      numeric && F("Reading for a full bar", I(s, "max", "num", { step: "any" }), "At or above this, the whole bar is lit"),
-      numeric && rangeInfo,
-      F("Drain instead of fill", I(s, "invert", "tog"), "Starts full and empties (countdown style)"),
+        kindId === "countdown"
+          ? "Start it from an automation with wled_bars.start_timer (bar, duration)."
+          : "Drive this bar from automations: wled_bars.set_value (bar, value) or wled_bars.start_timer (bar, duration)."),
+      numeric && !plainPercent && [
+        h("div", { class: "sub" }, isTemp ? "Scale – drag the two handles to the coldest and hottest you want to show" : "Scale – drag the handles to the readings that mean empty and full"),
+        rangeMap.el,
+        rangeNow,
+        presets.length > 0 && h("div", { class: "chips full" }, presets.map(([label, lo, hi]) =>
+          h("button", { class: "chip", style: "padding:4px 10px", onclick: (e) => { e.preventDefault(); setRange(lo, hi); } }, label))),
+        F(isTemp ? "Coldest (empty bar)" : "Empty at", I(s, "min", "num", { step: "any" })),
+        F(isTemp ? "Hottest (full bar)" : "Full at", I(s, "max", "num", { step: "any" })),
+      ],
+      numeric && plainPercent && h("div", { class: "dim sm full" }, "Uses 0–100 as empty to full. ",
+        h("button", { class: "link", onclick: (e) => { e.preventDefault(); this._showRange = true; this._touch(true); } }, "Use a different scale")),
+      !kind.noDrain && F("Drain instead of fill", I(s, "invert", "tog"), "Starts full and empties (countdown style)"),
     ]));
 
     // --- 3. colour ---
@@ -1084,8 +1467,7 @@ class WledBarsPanel extends HTMLElement {
         F("Warning colour", I(ua, "color", "color"), "Slow pulse across the bar"),
       ],
       vis: () => [
-        F("Only while this entity…", I(v, "entity", "entity", {}), "e.g. a schedule helper or a status sensor"),
-        F("…is one of", I(v, "states", "text", { placeholder: "on, printing" }), "Comma separated (default: on)"),
+        ...this._conditionBuilder(v),
         F("Hide at 0 %", I(v, "hide_at_zero", "tog")),
         F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
       ],
@@ -1098,7 +1480,7 @@ class WledBarsPanel extends HTMLElement {
 
     const isOn = (def) => def.active(d) || this._added.has(def.id);
     const on = ADDONS.filter(isOn);
-    const off = ADDONS.filter((def) => !isOn(def));
+    const off = ADDONS.filter((def) => !isOn(def) && !kind.hide.includes(def.id));
     this._flashEl = null;
     if (on.length) form.append(h("div", { class: "divider" }, h("span", {}, `Added to this bar · ${on.length}`)));
     for (const def of on) form.append(this._addonCard(def, bodies[def.id]()));
@@ -1239,6 +1621,10 @@ class WledBarsPanel extends HTMLElement {
       this._preview.pixels = px;
       this._preview.draw();
       if (this._rangeInfo) this._rangeInfo();
+      if (this._condDots && this._condDots.length && now - (this._condAt || 0) > 1) {
+        this._condAt = now;
+        for (const fn of this._condDots) fn();
+      }
       if (this._picker) {
         const n = this._device.led_count;
         const all = new Array(n).fill([0, 0, 0]);

@@ -38,6 +38,7 @@ DEFAULT_RULE = {
 DEFAULT_BAR = {
     "id": "",
     "name": "New bar",
+    "kind": "",
     "enabled": True,
     "start": 0,
     "end": 29,
@@ -96,6 +97,8 @@ DEFAULT_BAR = {
         "states": "",
         "hide_at_zero": False,
         "hide_when_idle": True,
+        "match": "all",
+        "conditions": [],
     },
 }
 

@@ -31,6 +31,7 @@ export const DEFAULT_RULE = {
 export const DEFAULT_BAR = {
   id: "",
   name: "New bar",
+  kind: "",
   enabled: true,
   start: 0,
   end: 29,
@@ -89,6 +90,8 @@ export const DEFAULT_BAR = {
     states: "",
     hide_at_zero: false,
     hide_when_idle: true,
+    match: "all",
+    conditions: [],
   },
 };
 

@@ -285,6 +285,36 @@ async def main():
     mgr.set_preview(None, 0)
     print("ok preview on strip")
 
+    # "show only when" conditions
+    from datetime import datetime as _dt
+
+    mon_0830 = _dt(2026, 11, 9, 8, 30)  # a Monday
+    sun_0030 = _dt(2026, 11, 15, 0, 30)  # a Sunday, just after midnight
+    cond = mgr._condition
+    assert cond({"type": "time", "start": "07:00", "end": "09:00"}, mon_0830)
+    assert not cond({"type": "time", "start": "09:00", "end": "17:00"}, mon_0830)
+    assert cond({"type": "time", "start": "22:00", "end": "07:00"}, sun_0030), "overnight window"
+    assert cond({"type": "time", "start": "07:00", "end": "09:00", "days": [0, 1, 2, 3, 4]}, mon_0830)
+    assert not cond({"type": "time", "start": "07:00", "end": "09:00", "days": [5, 6]}, mon_0830)
+    # 00:30 on Sunday belongs to Saturday night's window
+    assert cond({"type": "time", "start": "22:00", "end": "07:00", "days": [5]}, sun_0030)
+    assert not cond({"type": "time", "start": "22:00", "end": "07:00", "days": [6]}, sun_0030)
+    assert cond({"type": "time", "start": "00:00", "end": "00:00", "days": [0]}, mon_0830), "all day"
+    hass.set("input_boolean.guests", "on")
+    hass.set("sensor.outdoor", 41)
+    assert cond({"type": "state", "entity": "input_boolean.guests", "states": ""}, mon_0830)
+    assert not cond({"type": "state", "entity": "input_boolean.guests", "states": "on", "negate": True}, mon_0830)
+    assert cond({"type": "numeric", "entity": "sensor.outdoor", "op": "<", "value": "50"}, mon_0830)
+    assert not cond({"type": "numeric", "entity": "sensor.missing", "op": "<", "value": "50"}, mon_0830)
+    never = {"type": "time", "start": "09:00", "end": "09:01", "days": []}
+    always = {"type": "state", "entity": "input_boolean.guests", "states": "on"}
+    utc_now = manager_mod.dt_util.utcnow()
+    in_window_now = mgr._condition(never, manager_mod.dt_util.as_local(utc_now))
+    assert mgr._conditions_ok({"match": "any", "conditions": [never, always]}, utc_now)
+    assert mgr._conditions_ok({"match": "all", "conditions": [never, always]}, utc_now) == in_window_now
+    assert mgr._conditions_ok({"match": "all", "conditions": []}, utc_now)
+    print("ok show-only-when conditions")
+
     await mgr.async_stop()
     await SESSION["s"].close()
     await runner.cleanup()

@@ -194,6 +194,11 @@ class BarsManager:
             src = bar["source"]
             ids.update((src["entity"], src["end_entity"], src["start_entity"]))
             ids.add(bar["visibility"]["entity"])
+            ids.update(
+                str(c.get("entity") or "")
+                for c in bar["visibility"]["conditions"]
+                if isinstance(c, dict)
+            )
             ids.update(m["entity"] for m in bar["markers"])
             ids.update(r["entity"] for r in bar["rules"])
         ids.add(self.settings["night"]["entity"])
@@ -461,6 +466,8 @@ class BarsManager:
             allowed = [s.strip().lower() for s in str(vis["states"]).split(",") if s.strip()] or ["on"]
             if current is None or current.lower() not in allowed:
                 return hidden()
+        if not self._conditions_ok(vis, utc):
+            return hidden()
 
         if state == "unavailable":
             rt.was_full = None
@@ -535,6 +542,46 @@ class BarsManager:
             "peak": peak,
             "complete_age": age,
         }
+
+    def _conditions_ok(self, vis: dict, utc: datetime) -> bool:
+        """Evaluate the bar's "show only when" conditions (all or any of them)."""
+        conds = [c for c in (vis.get("conditions") or []) if isinstance(c, dict)]
+        if not conds:
+            return True
+        local = dt_util.as_local(utc)
+        results = (self._condition(c, local) for c in conds)
+        return any(results) if vis.get("match") == "any" else all(results)
+
+    def _condition(self, cond: dict, local: datetime) -> bool:
+        kind = cond.get("type")
+        if kind == "time":
+            start = parse_hhmm(cond.get("start"))
+            end = parse_hhmm(cond.get("end"))
+            now_min = local.hour * 60 + local.minute + local.second / 60.0
+            weekday = local.weekday()  # Monday = 0
+            inside = True
+            if start is not None and end is not None and start != end:
+                inside = in_window(now_min, start, end) is not None
+                if start > end and now_min < end:
+                    weekday = (weekday - 1) % 7  # after midnight: belongs to yesterday's window
+            days = cond.get("days")
+            if isinstance(days, list) and days and weekday not in days:
+                return False
+            return inside
+        entity = str(cond.get("entity") or "")
+        if not entity:
+            return True  # half-filled condition: don't hide the bar because of it
+        if kind == "state":
+            current = self._state(entity)
+            allowed = [s.strip().lower() for s in str(cond.get("states") or "").split(",") if s.strip()] or ["on"]
+            result = current is not None and current.lower() in allowed
+            return not result if cond.get("negate") else result
+        if kind == "numeric":
+            current = self._number(entity)
+            if current is None:
+                return False
+            return engine.compare(current, str(cond.get("op") or ">="), cond.get("value"))
+        return True
 
     def _brightness(self, utc: datetime) -> float:
         level = engine.clamp(engine.num(self.settings["brightness"], 100.0) / 100.0)
