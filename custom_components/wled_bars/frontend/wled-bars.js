@@ -143,11 +143,11 @@ const TEMP_PRESETS = {
 const EFFECTS = [["solid", "Steady"], ["blink", "Blink"], ["pulse", "Pulse (smooth)"], ["strobe", "Strobe (short flash)"]];
 const OPS = [[">=", "≥"], [">", ">"], ["<=", "≤"], ["<", "<"], ["==", "is"], ["!=", "is not"]];
 const SOURCE_TYPES = [
-  ["entity", "Number from an entity (sensor, battery, temperature…)"],
-  ["timer", "Timer helper (timer.*)"],
-  ["timestamp", "Until a finish time (timestamp sensor)"],
-  ["window", "Time of day (daily window)"],
-  ["manual", "Manual / automation (services)"],
+  ["entity", "A sensor or other entity's value"],
+  ["timer", "A timer helper"],
+  ["timestamp", "A finish time (washer, dryer, printer…)"],
+  ["window", "The time of day"],
+  ["manual", "An automation (set by a service call)"],
 ];
 const PALETTES = [
   ["Ocean", ["#00c8ff", "#7a5cff"]],
@@ -250,6 +250,9 @@ const TEMPLATES = [
 ];
 const presetKey = (tpl) => tpl.bar.kind || "blank";
 
+const newMarker = (d) => ({ ...clone(E.DEFAULT_MARKER), type: "value", color: "#ffffff",
+  value: Math.round(((E.num(d.source.min, 0) + E.num(d.source.max, 100)) / 2) * 10) / 10 });
+
 // Optional extras. Everything outside the three basic cards is an add-on that
 // can be attached to a bar and removed again. `active` reads the bar itself,
 // so saved bars and templates show the add-ons they already use.
@@ -264,7 +267,7 @@ const ADDONS = [
   { id: "ticks", icon: "📏", title: "Scale marks", hint: "Small marks every 10–50 % along the bar",
     active: (d) => Number(d.ticks.every) > 0, add: (d) => { d.ticks.every = 25; }, remove: (d) => { d.ticks.every = 0; } },
   { id: "markers", icon: "🎯", title: "Target marker", hint: "Pin a setpoint, limit or another entity onto the bar",
-    active: (d) => d.markers.length > 0, add: (d) => { if (!d.markers.length) d.markers.push(clone(E.DEFAULT_MARKER)); }, remove: (d) => { d.markers = []; } },
+    active: (d) => d.markers.length > 0, add: (d) => { if (!d.markers.length) d.markers.push(newMarker(d)); }, remove: (d) => { d.markers = []; } },
   { id: "peak", icon: "📌", title: "Peak hold", hint: "A dot that remembers the highest value",
     active: (d) => !!d.peak.enabled, add: (d) => { d.peak.enabled = true; }, remove: (d) => { d.peak.enabled = false; } },
   { id: "anim", icon: "🌊", title: "Motion", hint: "Breathe, flow, scanner or shimmer on the lit part",
@@ -281,7 +284,7 @@ const ADDONS = [
     add: (d) => { if (!d.visibility.conditions.length) d.visibility.conditions.push(NEW_CONDITION.time()); },
     remove: (d) => { Object.assign(d.visibility, { entity: "", states: "", hide_at_zero: false, hide_when_idle: true, match: "all", conditions: [] }); } },
   { id: "fill", icon: "↔️", title: "Fill direction & smoothing", hint: "Grow from the centre or both ends; glide speed",
-    active: (d) => d.fill_from !== "start" || !d.subpixel || Number(d.smoothing) !== E.DEFAULT_BAR.smoothing,
+    active: (d) => d.fill_from !== "start" || !d.subpixel,
     add: () => {}, remove: (d) => { d.fill_from = "start"; d.subpixel = true; d.smoothing = E.DEFAULT_BAR.smoothing; } },
 ];
 
@@ -307,6 +310,10 @@ class StripView {
     this.ranges = []; // {start, end, color, label}
     this.sel = null; // {start, end}
     this._drag = null; // {mode: "move"|"size", ...} while dragging
+    if (this.o.onClick) {
+      canvas.style.cursor = "pointer";
+      canvas.addEventListener("click", (e) => { const i = this.ledAt(e); if (i !== null) this.o.onClick(i); });
+    }
     if (this.o.onSelect) {
       // onSelect(lo, hi, done) always reports lo <= hi; direction is the caller's business.
       canvas.style.cursor = "crosshair";
@@ -552,7 +559,7 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .info{grid-column:1/-1;background:var(--wb-stage);border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.45}
 .divider{display:flex;align-items:center;gap:12px;color:var(--wb-dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--wb-line)}
-.addon{border-left:3px solid var(--wb-accent);scroll-margin:290px 0 24px}
+.addon{border-left:3px solid var(--wb-accent);scroll-margin:250px 0 24px}
 .addon summary{flex-wrap:wrap}
 .addon summary .rm{margin-left:auto;opacity:.75} .addon summary .rm:hover{opacity:1}
 .addon summary::after{margin-left:4px}
@@ -577,16 +584,17 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .map .hd:active{cursor:grabbing}
 .map .lb{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
 .map .lb b{color:var(--primary-text-color,#e6e9ef)}
-.map .now{position:absolute;top:28px;width:2px;height:18px;margin-left:-1px;background:#fff;opacity:.9;z-index:1}
+.map .now{position:absolute;top:26px;width:2px;height:30px;margin-left:-1px;background:#fff;opacity:.9;z-index:1}
 .map .ends{position:absolute;left:-14px;right:-14px;top:58px;display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);opacity:.7;pointer-events:none}
-.map .nl{position:absolute;top:44px;background:var(--wb-card);padding:0 4px;border-radius:4px;z-index:1;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
-.tb{position:relative;height:40px;touch-action:none;user-select:none;margin:0 14px;flex:1 1 100%}
-.tb .tr{position:absolute;left:0;right:0;top:8px;height:22px;border-radius:7px;background:var(--wb-stage);border:1px solid var(--wb-line);
+.map .nl{position:absolute;top:58px;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
+.tb{position:relative;height:54px;touch-action:none;user-select:none;margin:0 14px;flex:1 1 100%}
+.tb .tr{position:absolute;left:0;right:0;top:22px;height:22px;border-radius:7px;background:var(--wb-stage);border:1px solid var(--wb-line);
   background-image:repeating-linear-gradient(90deg,transparent 0,transparent calc(25% - 1px),var(--wb-line) calc(25% - 1px),var(--wb-line) 25%)}
-.tb .fl{position:absolute;top:8px;height:22px;background:color-mix(in srgb,var(--wb-accent) 55%,transparent);cursor:grab}
-.tb .hd{position:absolute;top:2px;width:28px;height:34px;margin-left:-14px;cursor:ew-resize;display:grid;place-items:center;z-index:2}
+.tb .fl{position:absolute;top:22px;height:22px;background:color-mix(in srgb,var(--wb-accent) 55%,transparent);cursor:grab}
+.tb .hd{position:absolute;top:16px;width:28px;height:34px;margin-left:-14px;cursor:ew-resize;display:grid;place-items:center;z-index:2}
 .tb .hd::after{content:"";width:8px;height:30px;border-radius:5px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
-.tb .now{position:absolute;top:4px;width:2px;height:30px;margin-left:-1px;background:#ffd24d;z-index:1;pointer-events:none}
+.tb .tl{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap;padding:0 3px}
+.tb .now{position:absolute;top:18px;width:2px;height:30px;margin-left:-1px;background:#ffd24d;z-index:1;pointer-events:none}
 .tbx{display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);margin:0 6px;flex:1 1 100%}
 .cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;border:1px solid var(--wb-line);border-radius:12px}
 .cond .ttl{font-weight:600;display:flex;align-items:center;gap:8px;flex:1;min-width:0}
@@ -603,12 +611,20 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .bar.dragging{opacity:.4}
 .bar.over{outline:2px dashed var(--wb-accent);outline-offset:2px}
 .grip{cursor:grab;color:var(--wb-dim);font-size:16px;line-height:1;padding:0 2px;user-select:none}
+input.bad{border-color:#ff8a5d}
+.epop{position:fixed;z-index:50;background:var(--wb-card);border:1px solid var(--wb-accent);border-radius:10px;overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.er{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--wb-line)}
+.er:last-child{border-bottom:0}
+.er:hover,.er.cur{background:color-mix(in srgb,var(--wb-accent) 18%,transparent)}
+.en{display:flex;justify-content:space-between;gap:10px} .en b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.en span{color:var(--wb-dim);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ei{font-size:11px;color:var(--wb-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty{text-align:center;padding:28px 12px}
 .banner{background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.4);border-radius:10px;padding:8px 12px}
 dialog{background:var(--wb-card);color:inherit;border:1px solid var(--wb-line);border-radius:16px;padding:0;max-width:min(620px,94vw);width:100%}
 dialog::backdrop{background:rgba(0,0,0,.55)}
 dialog .sec{grid-template-columns:1fr}
-@media(max-width:600px){.f{flex-wrap:wrap}.f>.fl{flex:1 0 100%}.wrap{padding:10px}}
+@media(max-width:600px){.f{flex-wrap:wrap}.f>.fl{flex:1 0 100%}.wrap{padding:10px}.sticky .nm{flex-basis:100% !important}.sticky .rowx{justify-content:flex-end}}
 `;
 
 // ---------- panel ----------
@@ -739,7 +755,7 @@ class WledBarsPanel extends HTMLElement {
       menu.narrow = this._narrow;
       top.append(menu);
     }
-    top.append(h("h1", {}, this._view === "edit" ? `Edit bar – ${this._draft.name || ""}` : "WLED Bars"));
+    top.append(h("h1", {}, this._view === "edit" ? (this._draftIndex < 0 ? "New bar" : "Edit bar") : "WLED Bars"));
     if (this._view === "list" && this._devices.length > 1) {
       top.append(
         h("select", { onchange: (e) => this._selectDevice(e.target.value) },
@@ -772,7 +788,10 @@ class WledBarsPanel extends HTMLElement {
   _renderList(wrap) {
     const dev = this._device;
     const canvas = h("canvas");
-    this._liveStrip = new StripView(canvas, { labels: true, max: 22 });
+    this._liveStrip = new StripView(canvas, { labels: true, max: 22, onClick: (led) => {
+      for (let k = this._bars.length - 1; k >= 0; k--) if (E.barLeds(this._bars[k]).includes(led)) return this._edit(k);
+      return null;
+    } });
     this._liveStrip.pixels = new Array(dev.led_count).fill([0, 0, 0]);
     this._liveStrip.ranges = this._bars.map((b, i) => ({ start: b.start, end: b.end, label: b.name, color: this._barColor(i) }));
     this._strips.push(this._liveStrip);
@@ -781,7 +800,7 @@ class WledBarsPanel extends HTMLElement {
     wrap.append(
       h("div", { class: "card" },
         h("div", { class: "rowx", style: "margin-bottom:10px" },
-          h("div", { class: "grow" }, h("h2", {}, dev.name), h("div", { class: "dim sm" }, `${dev.led_count} LEDs · ${dev.host} · live view`)),
+          h("div", { class: "grow" }, h("h2", {}, dev.name), h("div", { class: "dim sm" }, `${dev.led_count} LEDs · ${dev.host} · live view · click a bar to edit it`)),
           h("label", { class: "rowx sm" }, "All bars",
             h("input", { type: "checkbox", class: "sw", checked: !!this._settings.enabled,
               onchange: (e) => this._saveSettings({ ...this._settings, enabled: e.target.checked }) }))),
@@ -861,11 +880,17 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _newBar(tpl) {
-    const used = this._bars.reduce((m, b) => Math.max(m, b.start, b.end), -1);
     const count = this._device.led_count;
-    let start = used + 2 < count - 4 ? used + 2 : 0;
-    if (used < 0) start = 0;
-    const end = Math.min(count - 1, start + 29);
+    const taken = new Array(count).fill(false);
+    for (const b of this._bars) for (const i of E.barLeds(b)) if (i < count) taken[i] = true;
+    let best = [0, 0];
+    for (let i = 0, run = 0; i <= count; i++) {
+      if (i < count && !taken[i]) run++;
+      else { if (run > best[1]) best = [i - run, run]; run = 0; }
+    }
+    // use the gap when it is big enough to be a bar; otherwise start at LED 0 and let the user place it
+    const start = best[1] >= 6 ? best[0] : 0;
+    const end = Math.min(count - 1, start + Math.min(30, best[1] >= 6 ? best[1] : 30) - 1);
     this._draft = E.normalizeBar({ ...clone(tpl.bar), start, end, id: "" });
     const wanted = presetAddons(tpl, this._presets);
     for (const def of ADDONS) {
@@ -898,6 +923,7 @@ class WledBarsPanel extends HTMLElement {
     this._added = new Set(this._startAdded || []);
     this._startAdded = null;
     this._showRange = false;
+    this._moreOpen = new Set();
     this._scale = null;
     this._render();
     window.scrollTo?.(0, 0);
@@ -970,7 +996,7 @@ class WledBarsPanel extends HTMLElement {
     const d = this._draft;
     const pv = h("canvas");
     this._preview = new StripView(pv, { max: 30, min: 8 });
-    this._simOut = h("output", { class: "pct", style: "min-width:120px;text-align:right" });
+    this._simOut = h("output", { class: "pct", style: "min-width:96px;text-align:right;white-space:nowrap" });
     this._simRange = h("input", { type: "range", min: 0, max: 1000, step: 1, value: Math.round(this._sim.frac * 1000),
       oninput: (e) => { this._sim.frac = e.target.value / 1000; this._sim.play = false; this._sim.live = false; this._sim.completeAt = null; this._syncSimButtons(); this._pushStrip(); } });
     this._playBtn = h("button", { class: "btn", onclick: () => {
@@ -984,19 +1010,29 @@ class WledBarsPanel extends HTMLElement {
       onclick: () => this._stripPreview(!this._onStrip) }, "💡 Show on strip");
     this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, "🚫 Test offline");
 
+    this._simExtra = h("div", { class: "sim", style: "margin-top:6px" }, this._liveBtn, this._doneBtn, this._unavBtn);
+    this._simRange.title = "Drag to simulate a value";
+    this._draftOrig = JSON.stringify(E.normalizeBar(d));
+    let armed = 0;
+    const cancel = h("button", { class: "btn", onclick: () => {
+      const dirty = JSON.stringify(E.normalizeBar(this._draft)) !== this._draftOrig;
+      if (!dirty || armed) { clearTimeout(armed); this._closeEditor(); return; }
+      cancel.textContent = "Discard changes?";
+      cancel.style.borderColor = cancel.style.color = "#ff5d5d";
+      armed = setTimeout(() => { armed = 0; cancel.textContent = "Cancel"; cancel.style.borderColor = cancel.style.color = ""; }, 4000);
+    } }, "Cancel");
     const head = h("div", { class: "sticky" },
       h("div", { class: "rowx", style: "margin-bottom:10px" },
-        h("input", { type: "text", class: "grow", style: "font-size:16px;font-weight:600", value: d.name, placeholder: "Bar name",
+        h("input", { type: "text", class: "grow nm", style: "font-size:16px;font-weight:600;min-width:150px;flex-basis:150px", value: d.name, placeholder: "Bar name",
           oninput: (e) => { d.name = e.target.value; } }),
         h("label", { class: "rowx sm dim", title: "Turn this bar on or off" }, "Enabled",
           h("input", { type: "checkbox", class: "sw", checked: !!d.enabled, onchange: (e) => { d.enabled = e.target.checked; this._pushStrip(); } })),
-        h("button", { class: "btn", onclick: () => this._closeEditor() }, "Cancel"),
+        cancel,
         h("button", { class: "btn pri", onclick: () => this._saveDraft() }, "Save")),
       h("div", { class: "stage" }, pv),
       h("div", { class: "sim" },
-        this._playBtn, h("span", { class: "dim sm" }, "Simulate"), this._simRange, this._simOut),
-      h("div", { class: "sim", style: "margin-top:6px" },
-        this._stripBtn, this._liveBtn, this._doneBtn, this._unavBtn)
+        this._playBtn, this._simRange, this._simOut, this._stripBtn),
+      this._simExtra
     );
     this._form = h("div", { class: "editor" });
     this._lists = h("div", { style: "display:none" });
@@ -1018,6 +1054,7 @@ class WledBarsPanel extends HTMLElement {
     this._doneBtn.style.display = on("done") ? "" : "none";
     this._unavBtn.style.display = on("unavail") ? "" : "none";
     if (!on("unavail") && this._sim.unavailable) this._sim.unavailable = false;
+    this._simExtra.style.display = [this._liveBtn, this._doneBtn, this._unavBtn].some((b) => b.style.display !== "none") ? "" : "none";
   }
 
   _closeEditor() {
@@ -1100,11 +1137,65 @@ class WledBarsPanel extends HTMLElement {
     if (type === "tog") return h("input", { type: "checkbox", class: "sw", checked: !!obj[key], onchange: (e) => upd(e.target.checked, true) });
     if (type === "color") return h("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(obj[key]) ? obj[key] : "#ffffff", oninput: (e) => upd(e.target.value) });
     if (type === "time") return h("input", { type: "time", value: obj[key], oninput: (e) => upd(e.target.value) });
-    if (type === "entity")
-      return h("input", { type: "text", list: this._datalist(o.domains), value: obj[key] ?? "", placeholder: o.placeholder || "Start typing an entity…",
-        oninput: (e) => upd(e.target.value.trim()),
-        onchange: () => { if (o.rerender) { this._scale = null; this._touch(true); } } });
+    if (type === "entity") return this._entityInput(obj, key, o);
     return h("input", { type: "text", value: obj[key] ?? "", placeholder: o.placeholder, oninput: (e) => upd(e.target.value) });
+  }
+
+  // Search box for entities: matches names or ids, shows the current value.
+  _entityInput(obj, key, o) {
+    const states = this._hass?.states || {};
+    const before = obj[key] ?? "";
+    const input = h("input", { type: "text", value: before, placeholder: o.placeholder || "Search by name…", autocomplete: "off", spellcheck: false });
+    let pop = null, items = [], idx = -1;
+    const check = () => input.classList.toggle("bad", !!input.value.trim() && !states[input.value.trim()]);
+    const onScroll = (e) => { if (pop && e.target !== pop && !pop.contains(e.target)) close(); };
+    const close = () => { if (pop) { pop.remove(); pop = null; window.removeEventListener("scroll", onScroll, true); } };
+    const commit = () => {
+      close();
+      check();
+      if ((obj[key] ?? "") !== before && o.rerender) { this._scale = null; this._touch(true); }
+    };
+    const choose = (id) => { input.value = id; obj[key] = id; this._touch(false); commit(); if (!o.rerender) input.blur(); };
+    const mark = () => { if (pop) [...pop.children].forEach((row, i) => row.classList.toggle("cur", i === idx)); };
+    const open = () => {
+      close();
+      const typed = input.value.trim();
+      const words = states[typed] ? [] : typed.toLowerCase().split(/\s+/).filter(Boolean);
+      const text = (id) => `${id} ${states[id].attributes?.friendly_name || ""}`.toLowerCase();
+      let ids = Object.keys(states).filter((id) => !o.domains || !o.domains.length || o.domains.includes(id.split(".")[0]));
+      ids = ids.filter((id) => words.every((w) => text(id).includes(w)));
+      const rank = (id) => (o.prefer && o.prefer(states[id]) ? 0 : 1);
+      ids.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y));
+      items = ids.slice(0, 60);
+      idx = items.indexOf(typed);
+      const r = input.getBoundingClientRect();
+      const width = Math.max(r.width, 300);
+      pop = h("div", { class: "epop", style: `left:${Math.max(8, Math.min(r.left, window.innerWidth - width - 8))}px;top:${r.bottom + 4}px;width:${width}px;max-height:${Math.max(120, Math.min(280, window.innerHeight - r.bottom - 12))}px` },
+        items.length ? items.map((id) => {
+          const st = states[id];
+          return h("div", { class: "er", onmousedown: (e) => { e.preventDefault(); choose(id); } },
+            h("div", { class: "en" }, h("b", {}, st.attributes?.friendly_name || id), h("span", {}, `${st.state}${st.attributes?.unit_of_measurement || ""}`)),
+            h("div", { class: "ei" }, id));
+        }) : h("div", { class: "er dim" }, "Nothing matches"));
+      (input.closest("dialog") || this.shadowRoot).append(pop);
+      window.addEventListener("scroll", onScroll, true);
+      mark();
+    };
+    input.addEventListener("focus", open);
+    input.addEventListener("input", () => { obj[key] = input.value.trim(); this._touch(false); open(); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!pop) open();
+        e.preventDefault();
+        idx = Math.max(0, Math.min(items.length - 1, idx + (e.key === "ArrowDown" ? 1 : -1)));
+        mark();
+        pop?.children[idx]?.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && pop && items.length) { e.preventDefault(); choose(items[Math.max(0, idx)]); }
+      else if (e.key === "Escape") close();
+    });
+    input.addEventListener("blur", () => setTimeout(commit, 100));
+    check();
+    return input;
   }
 
   _f(label, control, hint, cls) {
@@ -1145,11 +1236,10 @@ class WledBarsPanel extends HTMLElement {
       const need = [a, b].concat(live === null ? [] : [live]);
       let lo, hi, step;
       if (temp) {
-        [lo, hi] = temp === "F" ? [-20, 120] : [-30, 50];
+        const pad = temp === "F" ? 30 : 15;
         step = temp === "F" ? 1 : 0.5;
-        const grid = 20;
-        lo = Math.min(lo, Math.floor(Math.min(...need) / grid) * grid);
-        hi = Math.max(hi, Math.ceil(Math.max(...need) / grid) * grid);
+        lo = Math.floor((Math.min(...need) - pad) / 10) * 10;
+        hi = Math.ceil((Math.max(...need) + pad) / 10) * 10;
       } else {
         const span = b - a || 10;
         const pow = Math.pow(10, Math.floor(Math.log10(span)));
@@ -1195,6 +1285,9 @@ class WledBarsPanel extends HTMLElement {
       const v = this._liveValue(E.normalizeBar(d));
       now.style.display = nowL.style.display = v === null ? "none" : "";
       if (v !== null) { now.style.left = nowL.style.left = pos(v); nowL.textContent = `now ${fmt(v)}${deg}`; }
+      // the scale's end labels step aside when "now" is on top of them
+      endL.firstChild.style.visibility = v !== null && at(v) < 0.14 ? "hidden" : "";
+      endL.lastChild.style.visibility = v !== null && at(v) > 0.86 ? "hidden" : "";
     };
     const wire = (handle, key, other) => dragHandle(handle,
       (e) => {
@@ -1226,7 +1319,8 @@ class WledBarsPanel extends HTMLElement {
     const fillA = h("div", { class: "fl" }), fillB = h("div", { class: "fl" });
     const hS = h("div", { class: "hd", title: "Start" }), hE = h("div", { class: "hd", title: "End" });
     const now = h("div", { class: "now", title: "Now" });
-    const el = h("div", { class: "tb" }, h("div", { class: "tr" }), fillA, fillB, now, hS, hE);
+    const tS = h("span", { class: "tl" }), tE = h("span", { class: "tl" });
+    const el = h("div", { class: "tb" }, h("div", { class: "tr" }), fillA, fillB, now, tS, tE, hS, hE);
     const label = h("b", {});
     const pct = (m) => `${(m / 1440) * 100}%`;
     const paint = () => {
@@ -1247,6 +1341,11 @@ class WledBarsPanel extends HTMLElement {
       const d = new Date();
       now.style.left = pct(d.getHours() * 60 + d.getMinutes());
       label.textContent = allDay ? "All day" : `${c.start} – ${c.end}${wrap ? " (overnight)" : ""}`;
+      tS.textContent = c.start; tE.textContent = c.end;
+      tS.style.left = pct(st); tE.style.left = pct(en);
+      const close = Math.abs(en - st) < 200;
+      tS.style.transform = close ? `translateX(${st <= en ? "-100%" : "0"})` : "";
+      tE.style.transform = close ? `translateX(${st <= en ? "0" : "-100%"})` : "";
     };
     const toMin = (e) => {
       const r = el.getBoundingClientRect();
@@ -1269,9 +1368,10 @@ class WledBarsPanel extends HTMLElement {
     v.conditions.forEach((c, i) => {
       const dot = h("span", { class: "dot" });
       this._condDots.push(() => {
-        const ok = condOk(c, getState);
+        const incomplete = c.type !== "time" && !c.entity;
+        const ok = !incomplete && condOk(c, getState);
         dot.classList.toggle("yes", ok);
-        dot.title = ok ? "True right now" : "Not true right now";
+        dot.title = incomplete ? "Choose an entity" : ok ? "True right now" : "Not true right now";
       });
       const remove = h("button", { class: "btn xs danger", title: "Remove this condition",
         onclick: (e) => { e.preventDefault(); v.conditions.splice(i, 1); this._touch(true); } }, "✕");
@@ -1311,13 +1411,26 @@ class WledBarsPanel extends HTMLElement {
     });
     const add = (type, label) => h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); v.conditions.push(NEW_CONDITION[type]()); this._touch(true); } }, label);
     return [
+      h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Add a condition:"), add("time", "🕒 Time of day"), add("state", "🔘 Entity state"), add("numeric", "🔢 Number")),
       v.conditions.length > 1 && h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Show when"),
         h("span", { class: "seg" },
           h("button", { class: v.match !== "any" ? "on" : "", onclick: (e) => { e.preventDefault(); v.match = "all"; this._touch(true); } }, "all of these are true"),
           h("button", { class: v.match === "any" ? "on" : "", onclick: (e) => { e.preventDefault(); v.match = "any"; this._touch(true); } }, "any of these is true"))),
       list,
-      h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Add:"), add("time", "🕒 Time of day"), add("state", "🔘 Entity state"), add("numeric", "🔢 Number")),
-      h("div", { class: "dim sm full" }, "Drag the ends of a time block, or the block itself. The dot is green when a condition is true right now. To show different bars on the same LEDs at different times, duplicate a bar and give each its own times."),
+      v.conditions.length > 0 && h("div", { class: "dim sm full" }, "Green dot = true right now. Yellow line = the current time."),
+    ];
+  }
+
+  // "More options" disclosure for the rarely-needed controls of a section.
+  _more(id, kids) {
+    const open = this._moreOpen.has(id);
+    return [
+      h("div", { class: "full" }, h("button", { class: "link", onclick: (e) => {
+        e.preventDefault();
+        if (open) this._moreOpen.delete(id); else this._moreOpen.add(id);
+        this._touch(true);
+      } }, open ? "Fewer options ▴" : "More options ▾")),
+      ...(open ? kids : []),
     ];
   }
 
@@ -1365,7 +1478,12 @@ class WledBarsPanel extends HTMLElement {
       },
     });
     const posInfo = h("div", { class: "dim sm full" });
-    this._hooks.push(() => { posInfo.textContent = `LED ${d.start} → ${d.end} · ${Math.abs(d.end - d.start) + 1} LEDs · fills from the green end towards the red end`; });
+    this._hooks.push(() => { 
+      const lo = Math.min(d.start, d.end), hi = Math.max(d.start, d.end);
+      const over = this._bars.filter((b, i) => i !== this._draftIndex && Math.min(b.start, b.end) <= hi && Math.max(b.start, b.end) >= lo).map((b) => b.name);
+      posInfo.textContent = `LED ${d.start} → ${d.end} · ${hi - lo + 1} LEDs · fills from the green end towards the red end`
+        + (over.length ? ` · shares LEDs with ${over.join(", ")}` : "");
+    });
     form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either white end to resize", [
       h("div", { class: "stage full" }, pick), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
@@ -1428,13 +1546,19 @@ class WledBarsPanel extends HTMLElement {
     }
     form.append(this._card("2", isTemp ? "Which temperature" : "What it shows", null, [
       sourceTypes.length > 1 && F("Follows", I(s, "type", "sel", { options: sourceTypes }), null, "full"),
-      s.type === "entity" && F(isTemp ? "Temperature sensor" : "Entity", I(s, "entity", "entity", { rerender: true, domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] }),
-        null, "full"),
+      s.type === "entity" && F(isTemp ? "Temperature sensor" : "Entity", I(s, "entity", "entity", { rerender: true,
+          prefer: kindId === "temperature" || kindId === "battery" ? (st) => st.attributes?.device_class === kindId : null,
+          domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] }),
+        s.entity ? (this._hass?.states?.[s.entity]?.attributes?.friendly_name || (this._hass?.states?.[s.entity] ? null : "No entity with this id")) : "Type part of its name", "full"),
       needsAttr && F("Attribute", I(s, "attribute", "text", { placeholder: "(state)" }), "e.g. current_temperature", "full"),
-      s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"] }), null, "full"),
-      s.type === "timestamp" && F("Finish time entity", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"] }), "A timestamp, e.g. washer end time"),
-      s.type === "timestamp" && F("Start time entity", I(s, "start_entity", "entity", { domains: ["sensor", "input_datetime"] }), "Optional"),
-      s.type === "timestamp" && F("Typical length (s)", I(s, "duration", "num", { min: 0, step: 60 }), "Used without a start entity. 0 = count from when the finish time appeared"),
+      s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"], rerender: true }), null, "full"),
+      s.type === "timestamp" && F("Finish time", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "A sensor that says when it will be done", "full"),
+      s.type === "timestamp" && this._more("finish", [
+        F("Start time", I(s, "start_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "Optional sensor for when it began", "full"),
+        F("Usual run time (minutes)", h("input", { type: "number", min: 0, step: 5, value: Math.round(E.num(s.duration, 0) / 60),
+          oninput: (e) => { if (e.target.value !== "") { s.duration = Math.max(0, Number(e.target.value)) * 60; this._touch(false); } } }),
+          "Used when there is no start time. 0 = measure from when the finish time first appears"),
+      ]),
       s.type === "window" && F("Starts at", I(s, "window_start", "time")),
       s.type === "window" && F("Ends at", I(s, "window_end", "time")),
       s.type === "manual" && h("div", { class: "dim sm full" },
@@ -1472,7 +1596,7 @@ class WledBarsPanel extends HTMLElement {
     if (c.mode !== "rainbow") {
       (multi ? c.stops : c.stops.slice(0, 1)).forEach((stop, i) => {
         const val = h("span", { class: "dim sm", style: "width:70px;text-align:right" });
-        const setVal = () => { val.textContent = numeric ? `≈ ${fmt(E.fracToValue(E.normalizeBar(d), stop.pos / 100))}` : ""; };
+        const setVal = () => { val.textContent = numeric ? `${Math.round(E.fracToValue(E.normalizeBar(d), stop.pos / 100) * 10) / 10}${deg}` : ""; };
         this._hooks.push(setVal);
         stopsBox.append(h("div", { class: "rowx" },
           I(stop, "color", "color"),
@@ -1493,7 +1617,7 @@ class WledBarsPanel extends HTMLElement {
         h("div", { class: "chips" }, PALETTES.map(([name, cols]) =>
           h("button", { class: "chip", onclick: (e) => { e.preventDefault(); c.stops = evenStops(cols); this._touch(true); } },
             h("i", { style: `background:linear-gradient(90deg,${cols.concat(cols.length === 1 ? cols : []).join(",")})` }), name)))),
-      c.mode === "gradient" && F("Gradient spans", I(c, "span", "sel", { options: [["bar", "The whole bar (revealed as it fills)"], ["fill", "Only the lit part (stretches)"]] })),
+      c.mode === "gradient" && F("Gradient spans", I(c, "span", "sel", { options: [["bar", "The whole bar"], ["fill", "The lit part only"]] })),
       c.mode === "value" && F("Blend between colours", I(c, "blend", "tog"), "Off = hard switch at each stop"),
       c.mode === "rainbow" && F("Rainbow length", I(c, "rainbow_span", "range", { min: 30, max: 720, step: 10, unit: "°" })),
       c.mode === "rainbow" && F("Rainbow scroll speed", I(c, "rainbow_speed", "range", { min: -180, max: 180, step: 5 })),
@@ -1517,11 +1641,13 @@ class WledBarsPanel extends HTMLElement {
         ...effect(t),
         F("Match the bar colour", I(t, "auto", "tog"), "A brighter tint of the bar"),
         !t.auto && F("Tip colour", I(t, "color", "color")),
-        F("Position", I(t, "position", "sel", { options: [["inside", "On the last lit LEDs"], ["ahead", "Just ahead of the bar"]] })),
-        t.effect !== "solid" && F("When “off”", I(t, "off", "sel", { options: [["under", "Show the bar underneath"], ["dark", "Go dark"]] })),
-        F("Fade out along the tip", I(t, "taper", "tog"), "Comet-style tail"),
-        F("Show at 0 %", I(t, "show_at_zero", "tog")),
-        F("Hide at 100 %", I(t, "hide_when_full", "tog")),
+        ...this._more("tip", [
+          F("Position", I(t, "position", "sel", { options: [["inside", "On the last lit LEDs"], ["ahead", "Just ahead of the bar"]] })),
+          t.effect !== "solid" && F("Between flashes", I(t, "off", "sel", { options: [["under", "Bar colour"], ["dark", "Dark"]] })),
+          F("Fade out along the tip", I(t, "taper", "tog"), "Comet-style tail"),
+          F("Show at 0 %", I(t, "show_at_zero", "tog")),
+          F("Hide at 100 %", I(t, "hide_when_full", "tog")),
+        ]),
       ],
       caps: () => [...cap("start", "Beginning"), ...cap("end", "End")],
       track: () => [
@@ -1552,8 +1678,8 @@ class WledBarsPanel extends HTMLElement {
         });
         return [
           mk,
-          h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.markers.push(clone(E.DEFAULT_MARKER)); this._touch(true); } }, "+ Add another marker"),
-            h("span", { class: "dim sm", style: "margin-left:8px" }, "A marker is one LED pinned at a reading, in the same units as the range above (e.g. a 21° setpoint on a 15–30° bar).")),
+          h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.markers.push(newMarker(d)); this._touch(true); } }, "+ Add another marker"),
+            h("span", { class: "dim sm", style: "margin-left:8px" }, "One LED pinned at a reading, in the same units as the scale above.")),
         ];
       },
       peak: () => [
@@ -1568,22 +1694,27 @@ class WledBarsPanel extends HTMLElement {
       ],
       rules: () => {
         const rl = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
-        d.rules.forEach((r, i) => rl.append(h("div", { class: "item" },
-          h("span", { class: "dim" }, "When"),
-          I(r, "source", "sel", { options: [["percent", "fill %"], ["value", "reading"], ["entity", "entity"]] }),
-          r.source === "entity" && I(r, "entity", "entity", {}),
-          I(r, "op", "sel", { options: OPS }),
-          h("span", { style: "width:90px;display:flex" }, I(r, "value", "text", { placeholder: "value" })),
-          h("span", { class: "dim" }, "→"),
-          I(r, "use_color", "tog"), r.use_color && I(r, "color", "color"),
-          I(r, "effect", "sel", { options: EFFECTS }),
-          r.effect !== "solid" && I(r, "period", "num", { min: 0.2, max: 10, step: 0.1 }),
-          I(r, "scope", "sel", { options: [["fill", "lit part"], ["all", "whole bar"]] }),
-          h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, "✕"))));
+        d.rules.forEach((r, i) => rl.append(h("div", { class: "item", style: "flex-direction:column;align-items:stretch" },
+          h("div", { class: "rowx" },
+            h("span", { class: "dim", style: "width:38px" }, "When"),
+            I(r, "source", "sel", { options: [["percent", "the fill %"], ["value", isTemp ? "the temperature" : "the reading"], ["entity", "another entity"]] }),
+            r.source === "entity" && h("span", { class: "grow", style: "display:flex;min-width:160px" }, I(r, "entity", "entity", {})),
+            I(r, "op", "sel", { options: OPS }),
+            h("span", { style: "width:80px;display:flex" }, I(r, "value", "text", { placeholder: "value" })),
+            h("span", { class: "grow" }),
+            h("button", { class: "btn xs danger", title: "Remove this alert", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, "✕")),
+          h("div", { class: "rowx" },
+            h("span", { class: "dim", style: "width:38px" }, "then"),
+            I(r, "effect", "sel", { options: EFFECTS }),
+            r.effect !== "solid" && h("span", { class: "rowx dim sm", style: "flex-wrap:nowrap" }, "every", h("span", { style: "width:58px;display:flex" }, I(r, "period", "num", { min: 0.2, max: 10, step: 0.1 })), "s"),
+            h("label", { class: "rowx sm" }, I(r, "use_color", "tog"), "in colour"),
+            r.use_color && I(r, "color", "color"),
+            h("span", { class: "dim sm" }, "on"),
+            I(r, "scope", "sel", { options: [["fill", "the lit part"], ["all", "the whole bar"]] })))));
         return [
           rl,
           h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.rules.push(clone(E.DEFAULT_RULE)); this._touch(true); } }, "+ Add another alert"),
-            h("span", { class: "dim sm", style: "margin-left:8px" }, "e.g. fill % ≥ 90 → red, blink, whole bar. The switch turns the colour change on or off. Later alerts win.")),
+            h("span", { class: "dim sm", style: "margin-left:8px" }, "When several alerts are true, the last one in the list wins.")),
         ];
       },
       done: () => [
@@ -1599,7 +1730,7 @@ class WledBarsPanel extends HTMLElement {
       vis: () => [
         ...this._conditionBuilder(v),
         F("Hide at 0 %", I(v, "hide_at_zero", "tog")),
-        F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
+        s.type !== "entity" && F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
       ],
       fill: () => [
         F("Fill grows from", I(d, "fill_from", "sel", { options: [["start", "The beginning"], ["end", "The end"], ["center", "The centre outwards"], ["edges", "Both ends inwards"]] })),
@@ -1700,7 +1831,7 @@ class WledBarsPanel extends HTMLElement {
         h("div", { style: "padding:16px 16px 4px" }, h("h2", { style: "margin:0" }, `${this._device.name} – device settings`)),
         h("div", { class: "sec" },
           F("Overall brightness", upd(st, "brightness", "range", { min: 1, max: 100, unit: " %" })),
-          F("How frames are sent", upd(st, "transport", "sel", { options: [["json", "Per-LED JSON – shares the strip with WLED (≈5 fps)"], ["ddp", "Realtime DDP – silky smooth, takes over the strip while a bar shows"]] })),
+          F("How frames are sent", upd(st, "transport", "sel", { options: [["json", "Shared with WLED effects (≈5 fps)"], ["ddp", "Smooth realtime (takes over the strip)"]] })),
           st.transport === "json" && F("WLED segment", upd(st, "segment", "sel", { options: segs }), "LED numbers count from this segment's start"),
           st.transport === "json" && F("When no bar is showing", upd(st, "idle", "sel", { options: [["release", "Give the LEDs back to WLED's effect"], ["black", "Leave bar LEDs off"]] })),
           F("Frames per second", upd(st, "fps", "num", { min: 0, max: 60 }), "0 = automatic"),
