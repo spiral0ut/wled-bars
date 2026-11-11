@@ -18,7 +18,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import engine
-from .const import DEFAULT_SETTINGS, DOMAIN, SIGNAL_SETTINGS
+from .const import DEFAULT_SETTINGS, DOMAIN, SIGNAL_SETTINGS, SIGNAL_STATUS
 from .wled import WledClient, WledError
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,6 +66,25 @@ def in_window(now_min: float, start: int, end: int) -> float | None:
     return elapsed / length
 
 
+EARTH_RADIUS_M = 6371008.8
+UNIT_METRES = {"m": 1.0, "km": 1000.0, "mi": 1609.344, "ft": 0.3048, "yd": 0.9144}
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two points, in metres."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
+
+
+def distance_fraction(remaining: float, total: float) -> float:
+    """How far along a trip: 0 at `total` away, 1 on arrival."""
+    if total <= 0:
+        return 1.0 if remaining <= 0 else 0.0
+    return engine.clamp(1.0 - remaining / total)
+
+
 class BarRuntime:
     """Live state of one bar that is not part of its saved configuration."""
 
@@ -80,6 +99,8 @@ class BarRuntime:
         self.timer: tuple[datetime, float] | None = None  # (started, seconds)
         self.manual_value: float | None = None
         self.auto_start: tuple[str, datetime] | None = None  # (end state, first seen)
+        self.dist_start: float | None = None  # farthest distance seen on this trip (auto scale)
+        self.dist_arrived = False
         self.easing = False
         self.total: float | None = None  # length in seconds of a running time-based source
         self.status: dict = {}
@@ -111,6 +132,7 @@ class BarsManager:
         self._preview: tuple[dict, float, float] | None = None  # (bar, frac, expires)
         self._identify: tuple[list[int], float] | None = None  # (leds, until)
         self._last_frame: dict[int, tuple[int, int, int]] = {}
+        self._status_sig: tuple = ()
 
     # ---------- lifecycle ----------
 
@@ -193,6 +215,8 @@ class BarsManager:
         for bar in self.bars:
             src = bar["source"]
             ids.update((src["entity"], src["end_entity"], src["start_entity"]))
+            if src["type"] == "distance":
+                ids.update((src["to_zone"], src["from_zone"]))
             ids.add(bar["visibility"]["entity"])
             ids.update(
                 str(c.get("entity") or "")
@@ -346,6 +370,72 @@ class BarsManager:
             parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
         return dt_util.as_utc(parsed)
 
+    def _place(self, entity_id: str) -> tuple[float, float, float] | None:
+        """(latitude, longitude, radius in metres) of a zone, person or tracker."""
+        st = self.hass.states.get(entity_id) if entity_id else None
+        if st is None:
+            return None
+        lat = engine.num(st.attributes.get("latitude"), None)
+        lon = engine.num(st.attributes.get("longitude"), None)
+        if lat is None or lon is None:
+            return None
+        return (lat, lon, max(0.0, engine.num(st.attributes.get("radius"), 0.0)))
+
+    def _distance(self, rt: BarRuntime) -> tuple[str, float, float | None]:
+        """Progress towards a place. Fills as the tracked thing gets closer.
+
+        The tracked entity is either something with a position (person,
+        device tracker) or a sensor that already reports a distance. The full
+        length of the trip is the distance between two zones, a set distance,
+        or the farthest point seen since the bar appeared ("auto").
+        """
+        src = rt.bar["source"]
+        if not src["entity"]:
+            return ("idle", 0.0, None)
+        st = self.hass.states.get(src["entity"])
+        if st is None or st.state.lower() in UNAVAILABLE:
+            return ("unavailable", 0.0, None)
+        dest = self._place(src["to_zone"] or "zone.home")
+
+        reading = engine.num(st.state, None)
+        if reading is not None:
+            # a distance sensor: metres if its unit is known, otherwise its own units
+            scale = UNIT_METRES.get(str(st.attributes.get("unit_of_measurement") or "").strip().lower())
+            remaining = max(0.0, reading) * (scale or 1.0)
+        else:
+            here = self._place(src["entity"])
+            if here is None or dest is None:
+                return ("unavailable", 0.0, None)
+            scale = 1.0
+            remaining = max(0.0, haversine_m(here[0], here[1], dest[0], dest[1]) - dest[2])
+
+        # the unit the set distance is typed in, and the remaining distance is reported in
+        unit = UNIT_METRES.get(str(src["dist_unit"]).strip().lower())
+        if reading is None:
+            factor = unit or UNIT_METRES["km"]
+        else:
+            factor = (unit if scale is not None else None) or scale or 1.0  # default: the sensor's own unit
+
+        mode = src["dist_mode"]
+        total = None
+        if mode == "zones" and scale is not None:
+            origin = self._place(src["from_zone"])
+            if origin is not None and dest is not None:
+                total = max(0.0, haversine_m(origin[0], origin[1], dest[0], dest[1]) - dest[2])
+        elif mode == "fixed":
+            total = max(0.0, engine.num(src["dist_total"], 0.0)) * factor
+        if total is None:
+            # auto: the trip is as long as the farthest point seen since the bar appeared
+            if remaining <= 0:
+                rt.dist_arrived = True
+            elif rt.dist_arrived:
+                rt.dist_arrived = False
+                rt.dist_start = None  # a new trip after arriving
+            rt.dist_start = max(rt.dist_start or 0.0, remaining)
+            total = rt.dist_start
+
+        return ("active", distance_fraction(remaining, total), round(remaining / factor, 2))
+
     def _source(self, rt: BarRuntime, utc: datetime) -> tuple[str, float, float | None]:
         """Return (state, raw fraction, raw value); state is active|idle|unavailable."""
         bar = rt.bar
@@ -408,6 +498,9 @@ class BarsManager:
             rt.total = total
             return ("active", min(1.0, elapsed / total), remaining)
 
+        if kind == "distance":
+            return self._distance(rt)
+
         if kind == "window":
             start_m = parse_hhmm(src["window_start"])
             end_m = parse_hhmm(src["window_end"])
@@ -458,6 +551,7 @@ class BarsManager:
             return None
 
         if not self.settings["enabled"] or not bar["enabled"]:
+            rt.dist_start = None  # an "auto" trip starts over when the bar next appears
             return hidden()
 
         vis = bar["visibility"]
@@ -467,6 +561,7 @@ class BarsManager:
             if current is None or current.lower() not in allowed:
                 return hidden()
         if not self._conditions_ok(vis, utc):
+            rt.dist_start = None
             return hidden()
 
         if state == "unavailable":
@@ -691,6 +786,14 @@ class BarsManager:
                 animated = True
 
         self._last_frame = frame
+        # tell the per-bar entities when something they show has changed
+        signature = tuple(
+            (rt.bar["id"], rt.status.get("state"), round(rt.status.get("percent") or 0.0), rt.status.get("visible"))
+            for rt in self.runtimes
+        )
+        if signature != self._status_sig:
+            self._status_sig = signature
+            async_dispatcher_send(self.hass, f"{SIGNAL_STATUS}_{self.entry.entry_id}")
         try:
             await self._push(frame)
             if not self.online:

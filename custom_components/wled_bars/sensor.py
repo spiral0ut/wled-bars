@@ -1,0 +1,41 @@
+"""A sensor per bar: how full it is right now."""
+from __future__ import annotations
+
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.const import PERCENTAGE
+
+from .entity_base import BarEntity, sync_bar_entities
+
+
+async def async_setup_entry(hass, entry, async_add_entities) -> None:
+    sync_bar_entities(hass, entry, async_add_entities, BarFill)
+
+
+class BarFill(BarEntity, SensorEntity):
+    """Fill of a bar in whole percent; unknown while it has nothing to show."""
+
+    suffix = "fill"
+    _attr_icon = "mdi:percent-outline"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, manager, bar_id: str) -> None:
+        super().__init__(manager, bar_id, "fill")
+
+    @property
+    def native_value(self) -> int | None:
+        rt = self.runtime
+        if rt is None or rt.status.get("state") != "active":
+            return None
+        return round(rt.status.get("percent") or 0.0)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rt = self.runtime
+        status = rt.status if rt else {}
+        return {
+            "showing": bool(status.get("visible")),
+            "status": status.get("state"),
+            "value": status.get("value"),
+        }

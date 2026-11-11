@@ -8,7 +8,8 @@ STATIC_URL = "/wled_bars_static"
 PANEL_URL_PATH = "wled-bars"
 PANEL_ELEMENT = "wled-bars-panel"
 
-SIGNAL_SETTINGS = f"{DOMAIN}_settings"
+SIGNAL_SETTINGS = f"{DOMAIN}_settings"  # bars or settings were saved
+SIGNAL_STATUS = f"{DOMAIN}_status"  # a bar's percent / visibility changed
 
 DEFAULT_SETTINGS = {
     "enabled": True,

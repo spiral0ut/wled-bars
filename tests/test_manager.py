@@ -57,7 +57,46 @@ _mod("homeassistant")
 _mod("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
 _mod("homeassistant.helpers")
 _mod("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: SESSION["s"])
-_mod("homeassistant.helpers.dispatcher", async_dispatcher_send=lambda *a: None)
+SIGNALS = {}  # signal -> [callbacks]
+SENT = []
+
+
+def _send(hass, signal, *args):
+    SENT.append(signal)
+    for cb in list(SIGNALS.get(signal, [])):
+        cb(*args)
+
+
+def _connect(hass, signal, cb):
+    SIGNALS.setdefault(signal, []).append(cb)
+    return lambda: SIGNALS[signal].remove(cb)
+
+
+class _Entity:
+    hass = None
+    entity_id = None
+
+    def async_write_ha_state(self):
+        self.written = getattr(self, "written", 0) + 1
+
+    def async_on_remove(self, _cb):
+        pass
+
+
+class _Registry:
+    def async_get(self, _entity_id):
+        return None
+
+
+_mod("homeassistant.helpers.dispatcher", async_dispatcher_send=_send, async_dispatcher_connect=_connect)
+_mod("homeassistant.helpers.entity", Entity=_Entity)
+_mod("homeassistant.helpers.entity_registry", async_get=lambda hass: _Registry())
+_mod("homeassistant.helpers.device_registry", DeviceInfo=dict)
+_mod("homeassistant.const", PERCENTAGE="%")
+_mod("homeassistant.components")
+_mod("homeassistant.components.switch", SwitchEntity=type("SwitchEntity", (), {}))
+_mod("homeassistant.components.number", NumberEntity=type("NumberEntity", (), {}), NumberMode=types.SimpleNamespace(SLIDER="slider"))
+_mod("homeassistant.components.sensor", SensorEntity=type("SensorEntity", (), {}), SensorStateClass=types.SimpleNamespace(MEASUREMENT="measurement"))
 _mod("homeassistant.helpers.event", async_track_state_change_event=lambda hass, ids, cb: hass.track(ids, cb))
 _mod("homeassistant.helpers.storage", Store=Store)
 _mod("homeassistant.util")
@@ -315,6 +354,91 @@ async def main():
     assert mgr._conditions_ok({"match": "all", "conditions": []}, utc_now)
     print("ok show-only-when conditions")
 
+    # ---- distance source ----
+    assert abs(manager_mod.haversine_m(0, 0, 0, 1) - 111195) < 50
+    home = {"latitude": 38.9000, "longitude": -77.0000, "radius": 100}
+    work = {"latitude": 38.9000, "longitude": -77.2000, "radius": 100}
+    hass.set("zone.home", "0", home)
+    hass.set("zone.work", "0", work)
+    full = manager_mod.haversine_m(38.9, -77.2, 38.9, -77.0) - 100  # centre of work to the edge of home
+
+    def dist_bar(**src):
+        return manager_mod.BarRuntime(engine.normalize_bar({"source": {"type": "distance", "entity": "person.matt", **src}}))
+
+    # between two zones: at work = 0 %, halfway = ~50 %, inside home = 100 %
+    rt = dist_bar(dist_mode="zones", from_zone="zone.work", to_zone="zone.home", dist_unit="mi")
+    hass.set("person.matt", "work", {"latitude": 38.9, "longitude": -77.2})
+    state, frac, value = mgr._distance(rt)
+    assert state == "active" and frac == 0.0, (state, frac)
+    assert abs(value - full / 1609.344) < 0.02, value
+    hass.set("person.matt", "not_home", {"latitude": 38.9, "longitude": -77.1})
+    assert abs(mgr._distance(rt)[1] - 0.5) < 0.01
+    hass.set("person.matt", "home", {"latitude": 38.9, "longitude": -77.0005})
+    assert mgr._distance(rt) == ("active", 1.0, 0.0)
+    # a set distance, in km
+    rt = dist_bar(dist_mode="fixed", dist_total=10, dist_unit="km")
+    hass.set("person.matt", "not_home", {"latitude": 38.9, "longitude": -77.0583})  # ~5.05 km from the centre
+    state, frac, value = mgr._distance(rt)
+    assert 0.48 < frac < 0.53 and 4.7 < value < 5.2, (frac, value)
+    # auto: the trip is as long as the farthest point seen; arriving starts a new trip
+    rt = dist_bar(dist_mode="auto", dist_unit="km")
+    hass.set("person.matt", "not_home", {"latitude": 38.9, "longitude": -77.2})
+    assert mgr._distance(rt)[1] == 0.0
+    hass.set("person.matt", "not_home", {"latitude": 38.9, "longitude": -77.1})
+    assert abs(mgr._distance(rt)[1] - 0.5) < 0.01
+    hass.set("person.matt", "home", {"latitude": 38.9, "longitude": -77.0})
+    assert mgr._distance(rt)[1] == 1.0
+    hass.set("person.matt", "not_home", {"latitude": 38.9, "longitude": -77.05})
+    assert mgr._distance(rt)[1] == 0.0, "a new trip after arriving starts empty"
+    # a distance sensor in feet with a set distance in miles
+    rt = manager_mod.BarRuntime(engine.normalize_bar({"source": {"type": "distance", "entity": "sensor.dist", "dist_mode": "fixed", "dist_total": 2, "dist_unit": "mi"}}))
+    hass.set("sensor.dist", 5280, {"unit_of_measurement": "ft"})
+    assert mgr._distance(rt) == ("active", 0.5, 1.0), mgr._distance(rt)
+    # no position -> unavailable
+    hass.set("person.matt", "unknown")
+    assert mgr._distance(dist_bar())[0] == "unavailable"
+    print("ok distance source")
+
+    # ---- per-bar entities ----
+    eb = importlib.import_module("wb.entity_base")
+    switch_mod = importlib.import_module("wb.switch")
+    number_mod = importlib.import_module("wb.number")
+    sensor_mod = importlib.import_module("wb.sensor")
+    hass.data = {"wled_bars": {mgr.entry.entry_id: mgr}}
+    hass.async_create_task = lambda coro: coro.close()
+    mgr.entry.async_on_unload = lambda cb: None
+    added = {"switch": [], "sensor": [], "number": []}
+    await mgr.async_save([
+        {"id": "a", "name": "Alpha", "start": 0, "end": 9, "source": {"type": "entity", "entity": "sensor.outdoor", "min": 0, "max": 82}},
+        {"id": "m", "name": "Manual", "start": 10, "end": 19, "source": {"type": "manual", "min": 0, "max": 10}},
+    ], None)
+    eb.sync_bar_entities(hass, mgr.entry, added["switch"].extend, switch_mod.BarSwitch)
+    eb.sync_bar_entities(hass, mgr.entry, added["sensor"].extend, sensor_mod.BarFill)
+    eb.sync_bar_entities(hass, mgr.entry, added["number"].extend, number_mod.BarValue, lambda bar: bar["source"]["type"] == "manual")
+    assert [e.name for e in added["switch"]] == ["Alpha", "Manual"]
+    assert [e.name for e in added["sensor"]] == ["Alpha fill", "Manual fill"]
+    assert [e.name for e in added["number"]] == ["Manual value"]
+    await settle(mgr, fake)
+    fill = added["sensor"][0]
+    assert fill.native_value == 50 and fill.extra_state_attributes["showing"] is True, (fill.native_value, fill.extra_state_attributes)
+    assert any(sig.startswith("wled_bars_status") for sig in SENT), "status changes must be signalled"
+    # the switch turns its bar off, and the bar stops showing
+    await added["switch"][0].async_turn_off()
+    assert added["switch"][0].is_on is False and mgr.bars[0]["enabled"] is False
+    # the number drives a manual bar
+    num = added["number"][0]
+    assert (num.native_min_value, num.native_max_value) == (0.0, 10.0)
+    await num.async_set_native_value(7.5)
+    await settle(mgr, fake)
+    assert num.native_value == 7.5 and added["sensor"][1].native_value == 75
+    # a new bar gets entities, a deleted bar loses them, a rename is followed
+    await mgr.async_save(
+        [{**mgr.bars[1], "name": "Renamed"}, {"id": "z", "name": "Zeta", "start": 20, "end": 29}], None
+    )
+    assert [e.name for e in added["switch"]] == ["Bar", "Renamed", "Zeta"], [e.name for e in added["switch"]]
+    assert added["switch"][0].available is False and added["switch"][1].available is True
+    print("ok per-bar entities")
+
     await mgr.async_stop()
     await SESSION["s"].close()
     await runner.cleanup()
@@ -325,4 +449,16 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    async def _guarded():
+        # a failed assertion must end the run at once rather than hang in shutdown
+        try:
+            await main()
+        except BaseException:  # noqa: BLE001
+            import os
+            import traceback
+
+            traceback.print_exc()
+            sys.stdout.flush()
+            os._exit(1)
+
+    asyncio.run(_guarded())

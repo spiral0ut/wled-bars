@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.2.3).** The render engine, the frame/transport logic and the editor UI are tested (see [Testing](#testing)), but this version has not yet been run inside a real Home Assistant install or against physical WLED hardware. Expect to find rough edges on first install.
+> **Status: early build (0.3.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -40,6 +40,7 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Show only when…:** build conditions visually: drag a block on a 24-hour bar, pick days of the week, or tie the bar to an entity's state or a number. Combine with *all* or *any*. Duplicate a bar and give each copy its own times to show different bars on the same LEDs through the day.
 - **Order:** drag bar cards to reorder them. Where bars share LEDs, the one further down the list is drawn on top.
 - **Preset defaults:** the *Preset defaults* button (top of the bar list) chooses which add-ons each preset starts with. It applies to every strip and only affects new bars.
+- **Distance to a place:** fills as a person, a device tracker or a distance sensor gets closer to a zone (home by default). The length of the bar is a set distance, the distance between two zones you pick (for example work to home), or wherever the trip starts.
 - **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
@@ -55,6 +56,18 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 | Best for | status bars sharing an ambient strip | a strip dedicated to bars, smooth pulses |
 
 With JSON, LED numbers count from the start of the chosen WLED segment; use a segment without grouping or spacing. DDP needs "Receive UDP realtime" enabled in WLED (the default).
+
+### Entities
+
+Each WLED device gets a **Bars** switch and a **Bars brightness** number. Each bar also gets:
+
+| Entity | What it is |
+|---|---|
+| `switch.<device>_bars_<bar>` | Turns that bar on or off |
+| `sensor.<device>_bars_<bar>_fill` | How full the bar is, in whole percent (unknown while it has nothing to show); attributes `showing`, `status`, `value` |
+| `number.<device>_bars_<bar>_value` | For bars driven by an automation: sets the bar's value |
+
+Entities follow the bar: they are created when a bar is added, renamed with it (the entity id stays the same) and removed when it is deleted.
 
 ### Services
 
@@ -113,5 +126,4 @@ Then open `http://localhost:8765/demo/` to try the editor without Home Assistant
 
 ## Not done yet
 
-- A run on a real Home Assistant instance and real WLED hardware.
-- Per-bar entities (each bar as its own switch/sensor), 2D matrix layouts, import/export, translations other than English.
+- 2D matrix layouts, import/export, translations other than English.

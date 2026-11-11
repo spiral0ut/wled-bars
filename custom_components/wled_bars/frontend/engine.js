@@ -51,6 +51,11 @@ export const DEFAULT_BAR = {
     duration: 3600,
     window_start: "07:00",
     window_end: "23:00",
+    to_zone: "zone.home",
+    from_zone: "",
+    dist_mode: "fixed",
+    dist_total: 10,
+    dist_unit: "",
   },
   color: {
     mode: "gradient",

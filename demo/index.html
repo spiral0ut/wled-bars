@@ -11,7 +11,7 @@
      Serve the repository root (python3 -m http.server) and open /demo/. -->
 <script type="module">
 import * as E from "../custom_components/wled_bars/frontend/engine.js";
-import { conditionsOk } from "../custom_components/wled_bars/frontend/wled-bars.js";
+import { conditionsOk, distanceInfo } from "../custom_components/wled_bars/frontend/wled-bars.js";
 
 const LEDS = 60;
 const states = {
@@ -20,6 +20,12 @@ const states = {
   "sensor.phone_battery": { state: "12", attributes: { friendly_name: "Phone battery", unit_of_measurement: "%", device_class: "battery" } },
   "climate.living_room": { state: "heat", attributes: { friendly_name: "Thermostat", temperature: 70, current_temperature: 72.5, current_humidity: 41, min_temp: 45, max_temp: 95, hvac_modes: ["heat", "cool", "off"], supported_features: 387 } },
   "input_number.target_temperature": { state: "70", attributes: { friendly_name: "Target temperature" } },
+  "zone.home": { state: "1", attributes: { friendly_name: "Home", latitude: 38.9, longitude: -77.0, radius: 100 } },
+  "zone.work": { state: "0", attributes: { friendly_name: "Work", latitude: 38.9, longitude: -77.2, radius: 150 } },
+  "zone.gym": { state: "0", attributes: { friendly_name: "Gym", latitude: 38.95, longitude: -77.05, radius: 80 } },
+  "person.matt": { state: "not_home", attributes: { friendly_name: "Matt", latitude: 38.9, longitude: -77.12 } },
+  "device_tracker.car": { state: "not_home", attributes: { friendly_name: "Car", latitude: 38.93, longitude: -77.08 } },
+  "sensor.phone_distance": { state: "21000", attributes: { friendly_name: "Phone distance from home", unit_of_measurement: "ft" } },
   "timer.kitchen": { state: "idle", attributes: { friendly_name: "Kitchen timer" } },
   "binary_sensor.printer_printing": { state: "on", attributes: { friendly_name: "Printer printing" } },
 };
@@ -46,6 +52,8 @@ setInterval(() => {
   const t = performance.now() / 1000;
   states["sensor.printer_progress"].state = String(Math.min(100, Math.round(((t % 40) / 30) * 1000) / 10));
   states["sensor.living_room_temperature"].state = (72 + 8 * Math.sin(t / 7)).toFixed(1);
+  // Matt drives from work towards home, over and over
+  states["person.matt"].attributes.longitude = -77.2 + 0.2 * ((t % 60) / 55 > 1 ? 1 : (t % 60) / 55);
 }, 500);
 
 setInterval(() => {
@@ -65,7 +73,8 @@ setInterval(() => {
   for (const bar of bars) {
     const v = E.num(getState(bar.source.entity), null);
     const ok = bar.source.type === "entity" && v !== null;
-    const target = ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
+    const dist = bar.source.type === "distance" ? distanceInfo(bar.source, states) : null;
+    const target = dist && dist.frac !== null ? dist.frac : ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
     shown[bar.id] = shown[bar.id] === undefined ? target : shown[bar.id] + (target - shown[bar.id]) * 0.15;
     if (target >= 1) fullSince[bar.id] = fullSince[bar.id] ?? t; else delete fullSince[bar.id];
     const allowed = settings.enabled && bar.enabled && conditionsOk(bar.visibility, getState);
@@ -80,7 +89,7 @@ setInterval(() => {
 
 const hass = {
   states,
-  config: { unit_system: { temperature: "°F" } },
+  config: { unit_system: { temperature: "°F", length: "mi" } },
   async callWS(msg) {
     const type = msg.type.split("/")[1];
     if (type === "devices") return [device];

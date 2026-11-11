@@ -58,6 +58,7 @@ const ICONS = {
   find: "M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM12 2v4M12 18v4M2 12h4M18 12h4",
   flip: "M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4",
   undo: "M4 9h10a6 6 0 0 1 0 12H9M8 5L4 9l4 4",
+  distance: "M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
   x: "M6 6l12 12M18 6L6 18",
   grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
 };
@@ -170,6 +171,53 @@ const condText = (c) => {
   return `${c.entity} ${(OPS.find((o) => o[0] === c.op) || [0, c.op])[1]} ${c.value}`;
 };
 
+// ---------- distance source (mirrors manager.py) ----------
+
+const UNIT_METRES = { m: 1, km: 1000, mi: 1609.344, ft: 0.3048, yd: 0.9144 };
+const haversineM = (lat1, lon1, lat2, lon2) => {
+  const rad = Math.PI / 180;
+  const dp = (lat2 - lat1) * rad, dl = (lon2 - lon1) * rad;
+  const a = Math.sin(dp / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dl / 2) ** 2;
+  return 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(a)));
+};
+const placeOf = (states, id) => {
+  const st = id && states[id];
+  if (!st) return null;
+  const lat = E.num(st.attributes?.latitude, null), lon = E.num(st.attributes?.longitude, null);
+  return lat === null || lon === null ? null : { lat, lon, radius: Math.max(0, E.num(st.attributes?.radius, 0)) };
+};
+// -> {remaining, total, frac, unit, sensor} with distances in the display unit; total/frac are null when unknown
+export function distanceInfo(source, states) {
+  const st = source.entity && states[source.entity];
+  if (!st || ["unavailable", "unknown", ""].includes(String(st.state).toLowerCase())) return null;
+  const dest = placeOf(states, source.to_zone || "zone.home");
+  const reading = E.num(st.state, null);
+  const sensorUnit = String(st.attributes?.unit_of_measurement || "").trim().toLowerCase();
+  let remaining, scale = 1;
+  if (reading !== null) {
+    scale = UNIT_METRES[sensorUnit] || null;
+    remaining = Math.max(0, reading) * (scale || 1);
+  } else {
+    const here = placeOf(states, source.entity);
+    if (!here || !dest) return null;
+    remaining = Math.max(0, haversineM(here.lat, here.lon, dest.lat, dest.lon) - dest.radius);
+  }
+  const unitKey = String(source.dist_unit || "").toLowerCase();
+  const unit = UNIT_METRES[unitKey];
+  const factor = reading === null ? unit || 1000 : (scale !== null ? unit : null) || scale || 1;
+  let total = null;
+  if (source.dist_mode === "zones" && scale !== null) {
+    const origin = placeOf(states, source.from_zone);
+    if (origin && dest) total = Math.max(0, haversineM(origin.lat, origin.lon, dest.lat, dest.lon) - dest.radius);
+  } else if (source.dist_mode === "fixed") total = Math.max(0, E.num(source.dist_total, 0)) * factor;
+  const frac = total === null ? null : total <= 0 ? (remaining <= 0 ? 1 : 0) : E.clamp(1 - remaining / total);
+  return {
+    remaining: remaining / factor, total: total === null ? null : total / factor, frac,
+    unit: reading === null ? (unit ? unitKey : "km") : (scale !== null && unit ? unitKey : sensorUnit),
+    sensor: reading !== null,
+  };
+}
+
 // ---------- bar kinds: what each preset needs ----------
 // sources: which "follows" choices make sense; hide: add-ons that don't apply;
 // range: how the empty/full mapping is presented.
@@ -182,6 +230,7 @@ const KINDS = {
   finish: { sources: ["timestamp"], hide: ["peak", "markers"] },
   day: { sources: ["window"], hide: ["done", "unavail", "peak", "markers"], noDrain: true },
   level: { sources: ["entity", "manual"], hide: ["done"], range: "percent", noDrain: true },
+  distance: { sources: ["distance"], hide: ["peak", "markers"] },
 };
 const TEMP_PRESETS = {
   F: [["Room", 60, 85], ["Outdoor", 0, 100], ["Fridge", 33, 45], ["Freezer", -10, 20]],
@@ -197,6 +246,7 @@ const SOURCE_TYPES = [
   ["timer", "A timer helper"],
   ["timestamp", "A finish time (washer, dryer, printer…)"],
   ["window", "The time of day"],
+  ["distance", "Distance to a place"],
   ["manual", "An automation (set by a service call)"],
 ];
 const PALETTES = [
@@ -294,6 +344,18 @@ const TEMPLATES = [
       tip: { enabled: false },
       peak: { enabled: true, color: "#ffffff", hold: 3 },
       smoothing: 0.2,
+    },
+  },
+  {
+    icon: "distance", name: "Distance to a place",
+    desc: "Fills as someone gets closer: to home, or between two zones.",
+    bar: {
+      name: "Distance", kind: "distance",
+      source: { type: "distance", to_zone: "zone.home", dist_mode: "fixed", dist_total: 10 },
+      color: { mode: "gradient", span: "bar", stops: evenStops(["#7a5cff", "#00c8ff", "#18e060"]) },
+      tip: { enabled: true, count: 1, effect: "pulse", period: 1.5, color: "#ffffff" },
+      on_complete: { effect: "pulse", color: "#18e060", duration: 8, then: "hold" },
+      smoothing: 1.5,
     },
   },
   { icon: "blank", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
@@ -890,6 +952,7 @@ class WledBarsPanel extends HTMLElement {
     if (s.type === "timer") return s.entity || "No timer chosen yet";
     if (s.type === "timestamp") return s.end_entity ? `until ${s.end_entity}` : "No finish-time entity yet";
     if (s.type === "window") return `daily ${s.window_start}–${s.window_end}`;
+    if (s.type === "distance") return s.entity ? `${s.entity} → ${(s.to_zone || "zone.home").replace(/^zone\./, "")}` : "Nobody chosen yet";
     return "manual / automation";
   }
 
@@ -954,6 +1017,7 @@ class WledBarsPanel extends HTMLElement {
     }
     this._startAdded = wanted; // so add-ons with nothing switched on yet still show
     if (this._draft.kind === "temperature" && this._tempUnit(this._draft) === "F") Object.assign(this._draft.source, { min: 60, max: 85 });
+    if (this._draft.source.type === "distance") this._draft.source.dist_unit = this._lengthUnit();
     this._draftIndex = -1;
     this._openEditor();
   }
@@ -1105,7 +1169,7 @@ class WledBarsPanel extends HTMLElement {
     const d = this._draft;
     if (!d) return;
     const on = (id) => ADDONS.find((a) => a.id === id).active(d) || this._added.has(id);
-    this._liveBtn.style.display = !this._sim.live && this._liveValue(E.normalizeBar(d)) !== null ? "" : "none";
+    this._liveBtn.style.display = !this._sim.live && this._liveNow(E.normalizeBar(d)) !== null ? "" : "none";
     this._doneBtn.style.display = on("done") ? "" : "none";
     this._unavBtn.style.display = on("unavail") ? "" : "none";
     if (!on("unavail") && this._sim.unavailable) this._sim.unavailable = false;
@@ -1219,7 +1283,7 @@ class WledBarsPanel extends HTMLElement {
       const text = (id) => `${id} ${states[id].attributes?.friendly_name || ""}`.toLowerCase();
       let ids = Object.keys(states).filter((id) => !o.domains || !o.domains.length || o.domains.includes(id.split(".")[0]));
       ids = ids.filter((id) => words.every((w) => text(id).includes(w)));
-      const rank = (id) => (o.prefer && o.prefer(states[id]) ? 0 : 1);
+      const rank = (id) => (o.prefer && o.prefer(states[id], id) ? 0 : 1);
       ids.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y));
       items = ids.slice(0, 60);
       idx = items.indexOf(typed);
@@ -1489,6 +1553,67 @@ class WledBarsPanel extends HTMLElement {
     ];
   }
 
+  _distanceFields(d) {
+    const s = d.source;
+    const states = this._hass?.states || {};
+    const I = (obj, key, type, o) => this._in(obj, key, type, o);
+    const F = (...a) => this._f(...a);
+    const nameOf = (id) => states[id]?.attributes?.friendly_name || (id || "").replace(/^[a-z_]+\./, "");
+    const tracked = states[s.entity];
+    const isSensor = !!tracked && E.num(tracked.state, null) !== null;
+    if (!s.dist_unit && !isSensor) s.dist_unit = this._lengthUnit();
+    if (isSensor && s.dist_mode === "zones" && !UNIT_METRES[String(tracked.attributes?.unit_of_measurement || "").toLowerCase()]) s.dist_mode = "fixed";
+    const modes = [["fixed", "A set distance"], ["zones", "Between two places"], ["auto", "Wherever the trip starts"]];
+    const info = h("div", { class: "info" });
+    let last = "";
+    this._rangeInfo = () => {
+      const now = distanceInfo(s, this._hass?.states || {});
+      let text;
+      if (!s.entity) text = "Choose a person, a device tracker or a distance sensor.";
+      else if (!now) text = `${nameOf(s.entity)} has no position right now, so the bar would hide.`;
+      else {
+        const dest = now.sensor ? "" : ` from ${nameOf(s.to_zone || "zone.home")}`;
+        text = `${nameOf(s.entity)} is ${fmt(now.remaining)} ${now.unit}${dest}`;
+        if (now.total !== null) text += `, which lights ${Math.round(now.frac * 100)} % of the bar. The whole bar is ${fmt(now.total)} ${now.unit}.`;
+        else if (s.dist_mode === "zones") text += ". Choose where the trip starts to set the bar's length.";
+        else text += ". The bar starts empty there each time it appears and fills as they get closer.";
+      }
+      if (text !== last) { last = text; info.textContent = text; }
+    };
+    const unitSel = h("select", { style: "width:96px;flex:none", onchange: (e) => { s.dist_unit = e.target.value; this._touch(true); } },
+      [["mi", "miles"], ["km", "km"]].map(([val, label]) => h("option", { value: val, selected: (s.dist_unit || this._lengthUnit()) === val }, label)));
+    return [
+      F("Who or what", I(s, "entity", "entity", { rerender: true, domains: ["person", "device_tracker", "sensor"], prefer: (_st, id) => id.startsWith("person.") }),
+        s.entity ? (tracked ? nameOf(s.entity) + (isSensor ? " (a distance sensor)" : "") : "No entity with this id") : "A person, a tracker, or a sensor that reports a distance", "full"),
+      !isSensor && F("Heading to", I(s, "to_zone", "entity", { rerender: true, domains: ["zone"], placeholder: "zone.home" }), nameOf(s.to_zone || "zone.home"), "full"),
+      h("div", { class: "sub" }, "How far away is an empty bar?"),
+      h("div", { class: "full" }, h("span", { class: "seg" }, modes.filter(([val]) => val !== "zones" || !isSensor || s.dist_mode === "zones").map(([val, label]) =>
+        h("button", { class: s.dist_mode === val ? "on" : "", onclick: (e) => { e.preventDefault(); s.dist_mode = val; this._touch(true); } }, label)))),
+      s.dist_mode === "fixed" && F("Empty at", h("span", { class: "rowx", style: "flex-wrap:nowrap" },
+        I(s, "dist_total", "num", { min: 0, step: "any" }), isSensor && !UNIT_METRES[String(tracked.attributes?.unit_of_measurement || "").toLowerCase()]
+          ? h("span", { class: "dim sm" }, tracked.attributes?.unit_of_measurement || "in the sensor's units") : unitSel), "This far away or more, nothing is lit"),
+      s.dist_mode === "zones" && F("Starting from", I(s, "from_zone", "entity", { rerender: true, domains: ["zone"], placeholder: "Search zones…" }),
+        s.from_zone ? nameOf(s.from_zone) : "For example, work", "full"),
+      s.dist_mode === "zones" && F("Show distances in", unitSel),
+      s.dist_mode === "auto" && F("Show distances in", unitSel),
+      info,
+    ];
+  }
+
+  _lengthUnit() {
+    return /mi/i.test(this._hass?.config?.unit_system?.length || "") ? "mi" : "km";
+  }
+
+  // What the preview should follow right now: {frac, value, unit} or null.
+  _liveNow(bar) {
+    if (bar.source.type === "distance") {
+      const info = distanceInfo(bar.source, this._hass?.states || {});
+      return info && info.frac !== null ? { frac: info.frac, value: info.remaining, unit: ` ${info.unit}` } : null;
+    }
+    const value = this._liveValue(bar);
+    return value === null ? null : { frac: E.valueToFrac(bar, value), value, unit: this._liveUnit(bar) };
+  }
+
   _liveValue(bar) {
     const s = bar.source;
     if (s.type !== "entity" || !s.entity) return null;
@@ -1596,7 +1721,7 @@ class WledBarsPanel extends HTMLElement {
         const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
         let text = "";
         if (lo === hi) text = "Empty and full are the same number, so the bar can't fill. Drag one of the handles.";
-        else if (v !== null) text = `${fmt(v)}${unit} right now lights ${fmt(E.valueToFrac(bar, v) * 100)} % of the bar.`;
+        else if (v !== null) text = `${fmt(v)}${unit} right now lights ${Math.round(E.valueToFrac(bar, v) * 100)} % of the bar.`;
         if (lo > hi) text += " Empty is the higher number, so the bar grows as the reading falls.";
         if (text !== last) { last = text; rangeNow.textContent = text; }
         rangeMap.paint();
@@ -1623,7 +1748,7 @@ class WledBarsPanel extends HTMLElement {
         }
       } else if (!(Number(s.min) === 0 && Number(s.max) === 100)) presets.push(["0–100", 0, 100]);
     }
-    form.append(this._card("2", isTemp ? "Which temperature" : "What it shows", null, [
+    form.append(this._card("2", isTemp ? "Which temperature" : s.type === "distance" ? "Whose distance" : "What it shows", null, [
       sourceTypes.length > 1 && F("Follows", I(s, "type", "sel", { options: sourceTypes }), null, "full"),
       s.type === "entity" && F(isTemp ? "Temperature sensor" : "Entity", I(s, "entity", "entity", { rerender: true,
           prefer: kindId === "temperature" || kindId === "battery" ? (st) => st.attributes?.device_class === kindId : null,
@@ -1638,6 +1763,7 @@ class WledBarsPanel extends HTMLElement {
           oninput: (e) => { if (e.target.value !== "") { s.duration = Math.max(0, Number(e.target.value)) * 60; this._touch(false); } } }),
           "Used when there is no start time. 0 = measure from when the finish time first appears"),
       ]),
+      s.type === "distance" && this._distanceFields(d),
       s.type === "window" && F("Starts at", I(s, "window_start", "time")),
       s.type === "window" && F("Ends at", I(s, "window_end", "time")),
       s.type === "manual" && h("div", { class: "dim sm full" },
@@ -1746,7 +1872,7 @@ class WledBarsPanel extends HTMLElement {
           this._hooks.push(() => {
             const bar = E.normalizeBar(d);
             const mv = m.type === "entity" ? E.num(this._hass?.states?.[m.entity]?.state, null) : E.num(m.value, null);
-            where.textContent = mv === null ? "" : `= ${fmt(E.valueToFrac(bar, mv) * 100)} % along`;
+            where.textContent = mv === null ? "" : `= ${Math.round(E.valueToFrac(bar, mv) * 100)} % along`;
           });
           mk.append(h("div", { class: "item" },
             I(m, "type", "sel", { options: [["value", "At reading"], ["entity", "Follows entity"]] }),
@@ -1809,7 +1935,7 @@ class WledBarsPanel extends HTMLElement {
       vis: () => [
         ...this._conditionBuilder(v),
         F("Hide at 0 %", I(v, "hide_at_zero", "tog")),
-        s.type !== "entity" && F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
+        s.type !== "entity" && s.type !== "distance" && F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
       ],
       fill: () => [
         F("Fill grows from", I(d, "fill_from", "sel", { options: [["start", "The beginning"], ["end", "The end"], ["center", "The centre outwards"], ["edges", "Both ends inwards"]] })),
@@ -1958,10 +2084,10 @@ class WledBarsPanel extends HTMLElement {
       this._simRange.value = Math.round(sim.frac * 1000);
     }
     const inv = bar.source.invert;
-    const liveValue = sim.live && !sim.play && !sim.unavailable ? this._liveValue(bar) : null;
-    if (liveValue !== null) {
-      const lf = E.valueToFrac(bar, liveValue);
-      const next = inv ? 1 - lf : lf;
+    const live = sim.live && !sim.play && !sim.unavailable ? this._liveNow(bar) : null;
+    const liveValue = live ? live.value : null;
+    if (live) {
+      const next = inv ? 1 - live.frac : live.frac;
       if (next !== sim.frac) {
         sim.frac = next;
         this._simRange.value = Math.round(next * 1000);
@@ -1983,9 +2109,9 @@ class WledBarsPanel extends HTMLElement {
       else if (now - this._simPeakAt > E.num(bar.peak.hold, 5)) this._simPeak = Math.max(frac, this._simPeak - 0.007);
     }
     const numeric = bar.source.type === "entity" || bar.source.type === "manual";
-    const unit = numeric ? this._liveUnit(bar) : "";
+    const unit = live ? live.unit : numeric ? this._liveUnit(bar) : "";
     this._simOut.textContent = sim.unavailable ? "unavailable"
-      : (liveValue !== null ? "live · " : "") + `${fmt(frac * 100)} %` + (numeric ? `  ·  ${fmt(value)}${unit}` : "");
+      : (live ? "live · " : "") + `${Math.round(frac * 100)} %` + (numeric || live ? `  ·  ${fmt(value)}${unit}` : "");
     return {
       t: now, frac, brightness: 1,
       rule: E.pickRule(bar, value, frac * 100, getState),
