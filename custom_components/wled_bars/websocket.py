@@ -105,7 +105,43 @@ def ws_subscribe(hass, connection, msg) -> None:
     connection.subscriptions[msg["id"]] = mgr.add_listener(forward)
 
 
+_PRESETS = f"{DOMAIN}_presets"
+
+
+async def _presets(hass: HomeAssistant) -> dict:
+    """Preset defaults shared by every strip: {preset key: [add-on ids]}."""
+    cache = hass.data.get(_PRESETS)
+    if cache is None:
+        from homeassistant.helpers.storage import Store
+
+        store = Store(hass, 1, f"{DOMAIN}.presets")
+        data = await store.async_load()
+        cache = hass.data[_PRESETS] = {"store": store, "data": data if isinstance(data, dict) else {}}
+    return cache
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/presets_get"})
+@websocket_api.async_response
+async def ws_presets_get(hass, connection, msg) -> None:
+    connection.send_result(msg["id"], (await _presets(hass))["data"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/presets_save", vol.Required("presets"): {str: [str]}}
+)
+@websocket_api.async_response
+async def ws_presets_save(hass, connection, msg) -> None:
+    cache = await _presets(hass)
+    cache["data"] = msg["presets"]
+    await cache["store"].async_save(cache["data"])
+    connection.send_result(msg["id"], cache["data"])
+
+
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    for command in (ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_subscribe):
+    for command in (
+        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_subscribe,
+        ws_presets_get, ws_presets_save,
+    ):
         websocket_api.async_register_command(hass, command)

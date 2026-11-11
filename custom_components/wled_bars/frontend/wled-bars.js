@@ -187,7 +187,6 @@ const TEMPLATES = [
       track: { mode: "color", color: "#ffffff", level: 3 },
       ticks: { every: 25, color: "#303030" },
       smoothing: 2,
-      unavailable: { mode: "show", color: "#ff3030" },
     },
   },
   {
@@ -249,6 +248,7 @@ const TEMPLATES = [
   },
   { icon: "✨", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
 ];
+const presetKey = (tpl) => tpl.bar.kind || "blank";
 
 // Optional extras. Everything outside the three basic cards is an add-on that
 // can be attached to a bar and removed again. `active` reads the bar itself,
@@ -285,6 +285,18 @@ const ADDONS = [
     add: () => {}, remove: (d) => { d.fill_from = "start"; d.subpixel = true; d.smoothing = E.DEFAULT_BAR.smoothing; } },
 ];
 
+// Which add-ons a preset starts with: the user's choice if they made one
+// (Preset defaults menu), otherwise whatever the built-in template uses.
+const builtinAddons = (tpl) => {
+  const bar = E.normalizeBar(clone(tpl.bar));
+  const hide = (KINDS[bar.kind] || KINDS[""]).hide;
+  return ADDONS.filter((a) => a.active(bar) && !hide.includes(a.id)).map((a) => a.id);
+};
+const presetAddons = (tpl, saved) => {
+  const mine = saved && saved[presetKey(tpl)];
+  return Array.isArray(mine) ? mine : builtinAddons(tpl);
+};
+
 // ---------- LED strip canvas ----------
 
 class StripView {
@@ -294,28 +306,63 @@ class StripView {
     this.pixels = [];
     this.ranges = []; // {start, end, color, label}
     this.sel = null; // {start, end}
-    this._drag = null;
+    this._drag = null; // {mode: "move"|"size", ...} while dragging
     if (this.o.onSelect) {
+      // onSelect(lo, hi, done) always reports lo <= hi; direction is the caller's business.
       canvas.style.cursor = "crosshair";
       canvas.style.touchAction = "none";
+      const zone = (i) => {
+        if (!this.sel || i === null) return "new";
+        const lo = Math.min(this.sel.start, this.sel.end), hi = Math.max(this.sel.start, this.sel.end);
+        if (i === lo && i === hi) return "hi";
+        if (i === lo) return "lo";
+        if (i === hi) return "hi";
+        return i > lo && i < hi ? "move" : "new";
+      };
+      const apply = (i, done) => {
+        const g = this._drag;
+        const n = Math.max(1, this.pixels.length);
+        let lo, hi;
+        if (g.mode === "move") {
+          const len = g.hi - g.lo;
+          lo = Math.max(0, Math.min(n - 1 - len, i - g.offset));
+          hi = lo + len;
+        } else {
+          lo = Math.min(g.anchor, i);
+          hi = Math.max(g.anchor, i);
+        }
+        this.o.onSelect(lo, hi, done);
+      };
       canvas.addEventListener("pointerdown", (e) => {
         const i = this.ledAt(e);
         if (i === null) return;
+        e.preventDefault();
         canvas.setPointerCapture(e.pointerId);
-        this._drag = i;
-        this.o.onSelect(i, i, false);
+        const z = zone(i);
+        const lo = this.sel ? Math.min(this.sel.start, this.sel.end) : i, hi = this.sel ? Math.max(this.sel.start, this.sel.end) : i;
+        if (z === "move") this._drag = { mode: "move", lo, hi, offset: i - lo };
+        else if (z === "lo") this._drag = { mode: "size", anchor: hi };
+        else if (z === "hi") this._drag = { mode: "size", anchor: lo };
+        else this._drag = { mode: "size", anchor: i };
+        canvas.style.cursor = z === "move" ? "grabbing" : "ew-resize";
+        if (z === "new") apply(i, false);
       });
       canvas.addEventListener("pointermove", (e) => {
-        if (this._drag === null) return;
+        if (!this._drag) {
+          const z = zone(this.ledAt(e));
+          canvas.style.cursor = z === "move" ? "grab" : z === "new" ? "crosshair" : "ew-resize";
+          return;
+        }
         const i = this.ledAt(e, true);
-        if (i !== null) this.o.onSelect(this._drag, i, false);
+        if (i !== null) apply(i, false);
       });
       const up = (e) => {
-        if (this._drag === null) return;
+        if (!this._drag) return;
         const i = this.ledAt(e, true);
-        const start = this._drag;
+        if (i !== null) apply(i, true);
+        else this.o.onSelect(Math.min(this.sel.start, this.sel.end), Math.max(this.sel.start, this.sel.end), true);
         this._drag = null;
-        this.o.onSelect(start, i === null ? start : i, true);
+        canvas.style.cursor = "crosshair";
       };
       canvas.addEventListener("pointerup", up);
       canvas.addEventListener("pointercancel", up);
@@ -408,6 +455,19 @@ class StripView {
         g.beginPath();
         g.arc(x, y, rad + 2.5, 0, Math.PI * 2);
         g.stroke();
+      }
+      if (this.o.onSelect) {
+        // grab handles on the two outer edges
+        g.fillStyle = "#ffffff";
+        for (const [i, side] of [[lo, -1], [hi, 1]]) {
+          if (i >= L.n) continue;
+          const [x, y] = pos(i);
+          const hx = x + side * (L.size / 2 - 1.5) - 2;
+          g.beginPath();
+          if (g.roundRect) g.roundRect(hx, y - L.size / 2 + 1, 4, L.size - 2, 2);
+          else g.rect(hx, y - L.size / 2 + 1, 4, L.size - 2);
+          g.fill();
+        }
       }
     }
   }
@@ -505,8 +565,11 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .add:hover{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 10%,transparent);transform:translateY(-1px)}
 .add .ic{font-size:20px;flex:none;width:26px;text-align:center}
 .add b{display:block;font-weight:600}
+.add.sel{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 16%,transparent)}
+.add .tick{margin-left:auto;color:var(--wb-accent);font-weight:700;width:14px}
+.chip.sel{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 22%,transparent)}
 .add small{display:block;color:var(--wb-dim);font-size:11.5px;line-height:1.3;margin-top:2px}
-.map{grid-column:1/-1;position:relative;height:74px;touch-action:none;user-select:none;margin:0 14px}
+.map{grid-column:1/-1;position:relative;height:76px;touch-action:none;user-select:none;margin:0 14px}
 .map .tr{position:absolute;left:-14px;right:-14px;top:32px;height:10px;border-radius:6px;background:var(--wb-stage);border:1px solid var(--wb-line)}
 .map .fl{position:absolute;top:32px;height:10px;border-radius:6px}
 .map .hd{position:absolute;top:22px;width:28px;height:30px;margin-left:-14px;cursor:grab;display:grid;place-items:center;z-index:2}
@@ -515,7 +578,8 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .map .lb{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
 .map .lb b{color:var(--primary-text-color,#e6e9ef)}
 .map .now{position:absolute;top:28px;width:2px;height:18px;margin-left:-1px;background:#fff;opacity:.9;z-index:1}
-.map .nl{position:absolute;top:56px;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
+.map .ends{position:absolute;left:-14px;right:-14px;top:58px;display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);opacity:.7;pointer-events:none}
+.map .nl{position:absolute;top:44px;background:var(--wb-card);padding:0 4px;border-radius:4px;z-index:1;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
 .tb{position:relative;height:40px;touch-action:none;user-select:none;margin:0 14px;flex:1 1 100%}
 .tb .tr{position:absolute;left:0;right:0;top:8px;height:22px;border-radius:7px;background:var(--wb-stage);border:1px solid var(--wb-line);
   background-image:repeating-linear-gradient(90deg,transparent 0,transparent calc(25% - 1px),var(--wb-line) calc(25% - 1px),var(--wb-line) 25%)}
@@ -607,6 +671,7 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _load() {
+    try { this._presets = (await this.ws("presets_get")) || {}; } catch (_e) { this._presets = {}; }
     try {
       this._devices = await this.ws("devices");
     } catch (err) {
@@ -683,6 +748,9 @@ class WledBarsPanel extends HTMLElement {
     }
     if (this._view === "list" && this._device) {
       top.append(h("button", { class: "btn", onclick: () => this._settingsDialog() }, "⚙ Device settings"));
+    }
+    if (this._view === "list") {
+      top.append(h("button", { class: "btn", title: "Choose which extras each preset starts with", onclick: () => this._presetsDialog() }, "🧩 Preset defaults"));
     }
     root.append(top);
     const wrap = h("div", { class: "wrap" });
@@ -799,6 +867,13 @@ class WledBarsPanel extends HTMLElement {
     if (used < 0) start = 0;
     const end = Math.min(count - 1, start + 29);
     this._draft = E.normalizeBar({ ...clone(tpl.bar), start, end, id: "" });
+    const wanted = presetAddons(tpl, this._presets);
+    for (const def of ADDONS) {
+      const has = def.active(this._draft);
+      if (wanted.includes(def.id) && !has) def.add(this._draft);
+      else if (!wanted.includes(def.id) && has) def.remove(this._draft);
+    }
+    this._startAdded = wanted; // so add-ons with nothing switched on yet still show
     if (this._draft.kind === "temperature" && this._tempUnit(this._draft) === "F") Object.assign(this._draft.source, { min: 60, max: 85 });
     this._draftIndex = -1;
     this._openEditor();
@@ -820,8 +895,10 @@ class WledBarsPanel extends HTMLElement {
     this._view = "edit";
     this._sim = { frac: 0.62, play: false, live: true, t0: 0, completeAt: null, unavailable: false };
     this._closed = new Set();
-    this._added = new Set();
+    this._added = new Set(this._startAdded || []);
+    this._startAdded = null;
     this._showRange = false;
+    this._scale = null;
     this._render();
     window.scrollTo?.(0, 0);
   }
@@ -1026,7 +1103,7 @@ class WledBarsPanel extends HTMLElement {
     if (type === "entity")
       return h("input", { type: "text", list: this._datalist(o.domains), value: obj[key] ?? "", placeholder: o.placeholder || "Start typing an entity…",
         oninput: (e) => upd(e.target.value.trim()),
-        onchange: () => { if (o.rerender) this._touch(true); } });
+        onchange: () => { if (o.rerender) { this._scale = null; this._touch(true); } } });
     return h("input", { type: "text", value: obj[key] ?? "", placeholder: o.placeholder, oninput: (e) => upd(e.target.value) });
   }
 
@@ -1056,25 +1133,47 @@ class WledBarsPanel extends HTMLElement {
   }
 
   // Draggable scale: two handles (empty / full) and a line for the current reading.
-  _rangeMap(d, deg, fixedStep) {
+  // The scale itself stays put for the whole editing session so nothing jumps
+  // under the pointer; it is only rebuilt when a value lands outside it.
+  _rangeMap(d, deg, temp) {
     const s = d.source;
     const lo0 = E.num(s.min, 0), hi0 = E.num(s.max, 100);
     const a = Math.min(lo0, hi0), b = Math.max(lo0, hi0);
-    const span = b - a || 10;
-    const live0 = this._liveValue(E.normalizeBar(d));
-    let sLo = a - span * 0.5, sHi = b + span * 0.5;
-    if (live0 !== null) { sLo = Math.min(sLo, live0 - span * 0.15); sHi = Math.max(sHi, live0 + span * 0.15); }
-    if (a >= 0 && b <= 100 && (live0 === null || (live0 >= 0 && live0 <= 100)) && span >= 40) { sLo = 0; sHi = 100; }
-    const raw = span / 30;
-    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
-    const step = fixedStep || Math.max(0.1, pow * (raw / pow >= 5 ? 5 : raw / pow >= 2 ? 2 : 1));
-    const snap = (x) => Math.round(Math.round(x / step) * step * 100) / 100;
-    const pos = (x) => `${E.clamp((x - sLo) / (sHi - sLo)) * 100}%`;
+    let sc = this._scale;
+    if (!sc || a < sc.lo || b > sc.hi) {
+      const live = this._liveValue(E.normalizeBar(d));
+      const need = [a, b].concat(live === null ? [] : [live]);
+      let lo, hi, step;
+      if (temp) {
+        [lo, hi] = temp === "F" ? [-20, 120] : [-30, 50];
+        step = temp === "F" ? 1 : 0.5;
+        const grid = 20;
+        lo = Math.min(lo, Math.floor(Math.min(...need) / grid) * grid);
+        hi = Math.max(hi, Math.ceil(Math.max(...need) / grid) * grid);
+      } else {
+        const span = b - a || 10;
+        const pow = Math.pow(10, Math.floor(Math.log10(span)));
+        const grid = pow * (span / pow >= 5 ? 5 : span / pow >= 2 ? 2 : 1) / 2;
+        lo = Math.floor((Math.min(...need) - span * 0.5) / grid) * grid;
+        hi = Math.ceil((Math.max(...need) + span * 0.5) / grid) * grid;
+        if (a >= 0 && lo < 0) lo = 0; // don't offer negatives for things that are never negative
+        const raw = (hi - lo) / 200;
+        const sp = Math.pow(10, Math.floor(Math.log10(raw)));
+        step = Math.max(0.1, sp * (raw / sp >= 5 ? 5 : raw / sp >= 2 ? 2 : 1));
+      }
+      sc = this._scale = { lo, hi, step };
+    }
+    const snap = (x) => Math.round(Math.round(x / sc.step) * sc.step * 100) / 100;
+    const at = (x) => E.clamp((x - sc.lo) / (sc.hi - sc.lo));
+    const pos = (x) => `${at(x) * 100}%`;
+    const order = lo0 <= hi0 ? 1 : -1; // handles keep their order; they can't cross
     const fill = h("div", { class: "fl" });
     const hLo = h("div", { class: "hd", title: "Empty" }), hHi = h("div", { class: "hd", title: "Full" });
     const lLo = h("div", { class: "lb" }), lHi = h("div", { class: "lb" });
     const now = h("div", { class: "now" }), nowL = h("div", { class: "nl" });
-    const el = h("div", { class: "map" }, h("div", { class: "tr" }), fill, now, nowL, lLo, lHi, hLo, hHi);
+    const endL = h("div", { class: "ends" }, h("span", {}, `${fmt(sc.lo)}${deg}`), h("span", {}, `${fmt(sc.hi)}${deg}`));
+    const el = h("div", { class: "map" }, h("div", { class: "tr" }), fill, now, nowL, lLo, lHi, hLo, hHi, endL);
+    const inputs = {};
     const paint = () => {
       const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
       const st = E.normalizeBar(d).color.stops;
@@ -1082,27 +1181,44 @@ class WledBarsPanel extends HTMLElement {
       if (cols.length === 1) cols.push(cols[0]);
       const left = Math.min(lo, hi), right = Math.max(lo, hi);
       fill.style.left = pos(left);
-      fill.style.width = `${(E.clamp((right - sLo) / (sHi - sLo)) - E.clamp((left - sLo) / (sHi - sLo))) * 100}%`;
+      fill.style.width = `${(at(right) - at(left)) * 100}%`;
       fill.style.background = `linear-gradient(${lo <= hi ? 90 : 270}deg,${cols.join(",")})`;
       hLo.style.left = lLo.style.left = pos(lo);
       hHi.style.left = lHi.style.left = pos(hi);
-      lLo.innerHTML = ""; lLo.append("Empty ", h("b", {}, `${fmt(lo)}${deg}`));
-      lHi.innerHTML = ""; lHi.append("Full ", h("b", {}, `${fmt(hi)}${deg}`));
+      // keep the two value labels from sitting on top of each other
+      const close = Math.abs(at(hi) - at(lo)) < 0.2;
+      const loLeft = at(lo) <= at(hi);
+      lLo.style.transform = close ? `translateX(${loLeft ? "-100%" : "0"})` : "";
+      lHi.style.transform = close ? `translateX(${loLeft ? "0" : "-100%"})` : "";
+      lLo.textContent = ""; lLo.append("Empty ", h("b", {}, `${fmt(lo)}${deg}`));
+      lHi.textContent = ""; lHi.append("Full ", h("b", {}, `${fmt(hi)}${deg}`));
       const v = this._liveValue(E.normalizeBar(d));
       now.style.display = nowL.style.display = v === null ? "none" : "";
       if (v !== null) { now.style.left = nowL.style.left = pos(v); nowL.textContent = `now ${fmt(v)}${deg}`; }
     };
-    const toValue = (e) => {
-      const r = el.getBoundingClientRect();
-      return snap(sLo + E.clamp((e.clientX - r.left) / r.width) * (sHi - sLo));
-    };
-    const wire = (handle, key) => dragHandle(handle, null,
-      (e) => { s[key] = toValue(e); paint(); for (const fn of this._hooks) fn(); },
-      () => this._touch(true));
-    wire(hLo, "min");
-    wire(hHi, "max");
+    const wire = (handle, key, other) => dragHandle(handle,
+      (e) => {
+        // remember where inside the handle it was grabbed, so it doesn't jump to the pointer
+        const r = el.getBoundingClientRect();
+        return { grab: (e.clientX - r.left) / r.width - at(E.num(s[key], 0)) };
+      },
+      (e, ctx) => {
+        const r = el.getBoundingClientRect();
+        let val = snap(sc.lo + E.clamp((e.clientX - r.left) / r.width - ctx.grab) * (sc.hi - sc.lo));
+        const limit = E.num(s[other], 0);
+        const sign = key === "min" ? order : -order; // min stays below max (or above, on a reversed scale)
+        if (sign > 0) val = Math.min(val, snap(limit - sc.step)); else val = Math.max(val, snap(limit + sc.step));
+        if (val === s[key]) return;
+        s[key] = val;
+        if (inputs[key]) inputs[key].value = val;
+        paint();
+        for (const fn of this._hooks) fn();
+      },
+      () => this._pushStrip());
+    wire(hLo, "min", "max");
+    wire(hHi, "max", "min");
     paint();
-    return { el, paint };
+    return { el, paint, inputs };
   }
 
   // 24-hour bar with draggable start/end; the block itself can be dragged too.
@@ -1240,14 +1356,20 @@ class WledBarsPanel extends HTMLElement {
     const pick = h("canvas");
     this._picker = new StripView(pick, {
       labels: true, max: 22,
-      onSelect: (a, b, done) => { d.start = a; d.end = b; if (done) this._touch(true); },
+      // dragging never changes which way the bar runs; only "Flip direction" does
+      onSelect: (lo, hi, done) => {
+        const reversed = d.start > d.end;
+        d.start = reversed ? hi : lo;
+        d.end = reversed ? lo : hi;
+        if (done) this._touch(true); else for (const fn of this._hooks) fn();
+      },
     });
     const posInfo = h("div", { class: "dim sm full" });
-    this._hooks.push(() => { posInfo.textContent = `LED ${d.start} → ${d.end} · ${Math.abs(d.end - d.start) + 1} LEDs · green ring = where the bar begins, red ring = where it ends`; });
-    form.append(this._card("1", "Where on the strip", "Drag from where the bar begins to where it ends", [
+    this._hooks.push(() => { posInfo.textContent = `LED ${d.start} → ${d.end} · ${Math.abs(d.end - d.start) + 1} LEDs · fills from the green end towards the red end`; });
+    form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either white end to resize", [
       h("div", { class: "stage full" }, pick), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
-      F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 }), "Lower than the start = runs backwards"),
+      F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 })),
       h("div", { class: "rowx full" },
         h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction"),
         h("button", { class: "btn", title: "Blink this range on the real strip so you can find it",
@@ -1268,7 +1390,7 @@ class WledBarsPanel extends HTMLElement {
     const rangeNow = h("div", { class: "dim sm full" });
     let rangeMap = null;
     if (numeric && !plainPercent) {
-      rangeMap = this._rangeMap(d, deg, isTemp ? (this._tempUnit(d) === "F" ? 1 : 0.5) : 0);
+      rangeMap = this._rangeMap(d, deg, isTemp ? this._tempUnit(d) : "");
       let last = "";
       this._rangeInfo = () => {
         const bar = E.normalizeBar(d);
@@ -1284,6 +1406,14 @@ class WledBarsPanel extends HTMLElement {
       };
     }
     const setRange = (lo, hi) => { s.min = lo; s.max = hi; this._touch(true); };
+    // typed values update the scale live; leaving the box re-fits the scale if needed
+    const rangeBox = (key) => {
+      const box = h("input", { type: "number", step: "any", value: s[key],
+        oninput: (e) => { if (e.target.value !== "" && !Number.isNaN(Number(e.target.value))) { s[key] = Number(e.target.value); this._touch(false); } },
+        onchange: () => this._touch(true) });
+      if (rangeMap) rangeMap.inputs[key] = box;
+      return box;
+    };
     const live = this._liveValue(E.normalizeBar(d));
     const presets = [];
     if (numeric && !plainPercent) {
@@ -1317,8 +1447,8 @@ class WledBarsPanel extends HTMLElement {
         rangeNow,
         presets.length > 0 && h("div", { class: "chips full" }, presets.map(([label, lo, hi]) =>
           h("button", { class: "chip", style: "padding:4px 10px", onclick: (e) => { e.preventDefault(); setRange(lo, hi); } }, label))),
-        F(isTemp ? "Coldest (empty bar)" : "Empty at", I(s, "min", "num", { step: "any" })),
-        F(isTemp ? "Hottest (full bar)" : "Full at", I(s, "max", "num", { step: "any" })),
+        F(isTemp ? "Coldest (empty bar)" : "Empty at", rangeBox("min")),
+        F(isTemp ? "Hottest (full bar)" : "Full at", rangeBox("max")),
       ],
       numeric && plainPercent && h("div", { class: "dim sm full" }, "Uses 0–100 as empty to full. ",
         h("button", { class: "link", onclick: (e) => { e.preventDefault(); this._showRange = true; this._touch(true); } }, "Use a different scale")),
@@ -1506,6 +1636,49 @@ class WledBarsPanel extends HTMLElement {
       requestAnimationFrame(() => el.scrollIntoView({ block: "nearest", behavior: "smooth" }));
     }
     this._flash = null;
+  }
+
+  // ----- preset defaults (shared by every strip) -----
+
+  _presetsDialog() {
+    const draft = clone(this._presets || {});
+    let current = TEMPLATES[0];
+    const dlg = h("dialog");
+    const draw = () => {
+      dlg.innerHTML = "";
+      const key = presetKey(current);
+      const chosen = presetAddons(current, draft);
+      const hide = (KINDS[current.bar.kind || ""] || KINDS[""]).hide;
+      const custom = Array.isArray(draft[key]);
+      dlg.append(
+        h("div", { style: "padding:16px 16px 4px" },
+          h("h2", { style: "margin:0 0 4px" }, "Preset defaults"),
+          h("div", { class: "dim sm" }, "Choose which extras a new bar starts with under “Added to this bar”. Applies to every strip; bars you already made are not changed.")),
+        h("div", { class: "chips", style: "padding:10px 16px 4px" }, TEMPLATES.map((t) =>
+          h("button", { class: "chip" + (t === current ? " sel" : ""), style: "padding:5px 12px", onclick: () => { current = t; draw(); } },
+            `${t.icon} ${t.name.replace(/ \(.*\)| \/ job|….*/g, "")}`))),
+        h("div", { class: "addgrid", style: "grid-template-columns:repeat(auto-fill,minmax(180px,1fr));padding-top:10px" },
+          ADDONS.filter((a) => !hide.includes(a.id)).map((a) => {
+            const on = chosen.includes(a.id);
+            return h("button", { class: "add" + (on ? " sel" : ""), onclick: () => {
+              draft[key] = on ? chosen.filter((x) => x !== a.id) : chosen.concat(a.id);
+              draw();
+            } }, h("span", { class: "ic" }, a.icon), h("span", {}, h("b", {}, a.title)), h("span", { class: "tick" }, on ? "✓" : ""));
+          })),
+        h("div", { class: "rowx", style: "padding:0 16px 16px" },
+          custom ? h("button", { class: "link", onclick: () => { delete draft[key]; draw(); } }, "Reset this preset to built-in")
+            : h("span", { class: "dim sm" }, "Built-in selection"),
+          h("span", { class: "grow" }),
+          h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
+          h("button", { class: "btn pri", onclick: async () => {
+            try { this._presets = (await this.ws("presets_save", { presets: draft })) || draft; } catch (_e) { this._presets = draft; }
+            dlg.close();
+          } }, "Save")));
+    };
+    dlg.addEventListener("close", () => dlg.remove());
+    this.shadowRoot.append(dlg);
+    draw();
+    dlg.showModal();
   }
 
   // ----- device settings -----

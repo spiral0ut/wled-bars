@@ -39,7 +39,8 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Tailored to the preset:** each template only shows what applies to it. A temperature gauge gets a draggable cold-to-hot scale with Room / Outdoor / Fridge / Freezer presets and no "finished" options; a countdown only offers timers.
 - **Show only when…:** build conditions visually: drag a block on a 24-hour bar, pick days of the week, or tie the bar to an entity's state or a number. Combine with *all* or *any*. Duplicate a bar and give each copy its own times to show different bars on the same LEDs through the day.
 - **Order:** drag bar cards to reorder them. Where bars share LEDs, the one further down the list is drawn on top.
-- **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip from where the bar should begin to where it should end.
+- **Preset defaults:** the *Preset defaults* button (top of the bar list) chooses which add-ons each preset starts with. It applies to every strip and only affects new bars.
+- **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
 - **Dashboard card:** add the *WLED Bars* card for a live view (`type: custom:wled-bars-card`, optional `title`, `entry_id` or `device`, `show_bars: false`).
