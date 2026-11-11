@@ -143,6 +143,40 @@ const TEMPLATES = [
   { icon: "✨", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
 ];
 
+// Optional extras. Everything outside the three basic cards is an add-on that
+// can be attached to a bar and removed again. `active` reads the bar itself,
+// so saved bars and templates show the add-ons they already use.
+const ADDONS = [
+  { id: "tip", icon: "✨", title: "Flashing tip", hint: "Bright or blinking LEDs at the leading edge",
+    active: (d) => !!d.tip.enabled, add: (d) => { d.tip.enabled = true; }, remove: (d) => { d.tip.enabled = false; } },
+  { id: "caps", icon: "🚩", title: "Begin & end markers", hint: "Always-on LEDs showing where the bar starts and stops",
+    active: (d) => d.caps.start.count > 0 || d.caps.end.count > 0,
+    add: (d) => { d.caps.start.count = 1; d.caps.end.count = 1; }, remove: (d) => { d.caps.start.count = 0; d.caps.end.count = 0; } },
+  { id: "track", icon: "〰️", title: "Ghost of the unlit part", hint: "Faintly light the empty part of the bar",
+    active: (d) => d.track.mode !== "off", add: (d) => { d.track.mode = "dim"; }, remove: (d) => { d.track.mode = "off"; } },
+  { id: "ticks", icon: "📏", title: "Scale marks", hint: "Small marks every 10–50 % along the bar",
+    active: (d) => Number(d.ticks.every) > 0, add: (d) => { d.ticks.every = 25; }, remove: (d) => { d.ticks.every = 0; } },
+  { id: "markers", icon: "🎯", title: "Target marker", hint: "Pin a setpoint, limit or another entity onto the bar",
+    active: (d) => d.markers.length > 0, add: (d) => { if (!d.markers.length) d.markers.push(clone(E.DEFAULT_MARKER)); }, remove: (d) => { d.markers = []; } },
+  { id: "peak", icon: "📌", title: "Peak hold", hint: "A dot that remembers the highest value",
+    active: (d) => !!d.peak.enabled, add: (d) => { d.peak.enabled = true; }, remove: (d) => { d.peak.enabled = false; } },
+  { id: "anim", icon: "🌊", title: "Motion", hint: "Breathe, flow, scanner or shimmer on the lit part",
+    active: (d) => d.animation.type !== "none", add: (d) => { d.animation.type = "flow"; }, remove: (d) => { d.animation.type = "none"; } },
+  { id: "rules", icon: "⚠️", title: "Alerts", hint: "Change colour or flash when a condition is met",
+    active: (d) => d.rules.length > 0, add: (d) => { if (!d.rules.length) d.rules.push(clone(E.DEFAULT_RULE)); }, remove: (d) => { d.rules = []; } },
+  { id: "done", icon: "🎉", title: "Finish celebration", hint: "Flash, sparkle or hide when it reaches 100 %",
+    active: (d) => d.on_complete.effect !== "none" || d.on_complete.then === "hide",
+    add: (d) => { d.on_complete.effect = "flash"; }, remove: (d) => { d.on_complete.effect = "none"; d.on_complete.then = "hold"; } },
+  { id: "unavail", icon: "🚫", title: "Offline warning", hint: "Pulse a warning colour when the source is unavailable",
+    active: (d) => d.unavailable.mode === "show", add: (d) => { d.unavailable.mode = "show"; }, remove: (d) => { d.unavailable.mode = "hide"; } },
+  { id: "vis", icon: "👁️", title: "Show only when…", hint: "Tie the bar to a schedule, a status or another entity",
+    active: (d) => !!d.visibility.entity || !!d.visibility.hide_at_zero || !d.visibility.hide_when_idle,
+    add: () => {}, remove: (d) => { Object.assign(d.visibility, { entity: "", states: "", hide_at_zero: false, hide_when_idle: true }); } },
+  { id: "fill", icon: "↔️", title: "Fill direction & smoothing", hint: "Grow from the centre or both ends; glide speed",
+    active: (d) => d.fill_from !== "start" || !d.subpixel || Number(d.smoothing) !== E.DEFAULT_BAR.smoothing,
+    add: () => {}, remove: (d) => { d.fill_from = "start"; d.subpixel = true; d.smoothing = E.DEFAULT_BAR.smoothing; } },
+];
+
 // ---------- LED strip canvas ----------
 
 class StripView {
@@ -342,6 +376,28 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chip{border:1px solid var(--wb-line);border-radius:20px;padding:3px 10px 3px 4px;display:flex;align-items:center;gap:6px;cursor:pointer;background:none;font-size:12px}
 .chip:hover{border-color:var(--wb-accent)} .chip i{width:34px;height:14px;border-radius:8px;display:block}
+.bc{padding:0}
+.bh{display:flex;align-items:center;gap:10px;padding:14px 16px 8px;font-weight:600;font-size:15px;flex-wrap:wrap}
+.bh small{font-weight:400;font-size:13px;color:var(--wb-dim)}
+.step{width:24px;height:24px;border-radius:50%;background:var(--wb-accent);color:#fff;font-size:13px;display:grid;place-items:center;flex:none}
+.step.plus{background:transparent;border:1px dashed var(--wb-dim);color:var(--wb-dim)}
+.info{grid-column:1/-1;background:var(--wb-stage);border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.45}
+.divider{display:flex;align-items:center;gap:12px;color:var(--wb-dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--wb-line)}
+.addon{border-left:3px solid var(--wb-accent);scroll-margin:290px 0 24px}
+.addon summary{flex-wrap:wrap}
+.addon summary .rm{margin-left:auto;opacity:.75} .addon summary .rm:hover{opacity:1}
+.addon summary::after{margin-left:4px}
+.addon.flash{animation:wbflash 1.4s ease-out}
+@keyframes wbflash{0%{box-shadow:0 0 0 3px var(--wb-accent);transform:scale(.985)}30%{transform:none}100%{box-shadow:0 0 0 3px transparent}}
+.tray{border-style:dashed}
+.addgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;padding:4px 16px 16px}
+.add{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:12px;padding:10px 12px;cursor:pointer;display:flex;gap:12px;align-items:center;
+  transition:border-color .12s,background .12s,transform .12s}
+.add:hover{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 10%,transparent);transform:translateY(-1px)}
+.add .ic{font-size:20px;flex:none;width:26px;text-align:center}
+.add b{display:block;font-weight:600}
+.add small{display:block;color:var(--wb-dim);font-size:11.5px;line-height:1.3;margin-top:2px}
 .empty{text-align:center;padding:28px 12px}
 .banner{background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.4);border-radius:10px;padding:8px 12px}
 dialog{background:var(--wb-card);color:inherit;border:1px solid var(--wb-line);border-radius:16px;padding:0;max-width:min(620px,94vw);width:100%}
@@ -366,7 +422,8 @@ class WledBarsPanel extends HTMLElement {
     this._draft = null;
     this._draftIndex = -1;
     this._sim = { frac: 0.62, play: false, t0: 0, completeAt: null, unavailable: false };
-    this._open = new Set(["pos", "src", "col", "tip"]);
+    this._closed = new Set();
+    this._added = new Set();
     this._onStrip = false;
     this._strips = [];
     this._raf = 0;
@@ -604,7 +661,9 @@ class WledBarsPanel extends HTMLElement {
 
   _openEditor() {
     this._view = "edit";
-    this._sim = { frac: 0.62, play: false, t0: 0, completeAt: null, unavailable: false };
+    this._sim = { frac: 0.62, play: false, live: true, t0: 0, completeAt: null, unavailable: false };
+    this._closed = new Set();
+    this._added = new Set();
     this._render();
     window.scrollTo?.(0, 0);
   }
@@ -640,26 +699,30 @@ class WledBarsPanel extends HTMLElement {
     this._preview = new StripView(pv, { max: 30, min: 8 });
     this._simOut = h("output", { class: "pct", style: "min-width:120px;text-align:right" });
     this._simRange = h("input", { type: "range", min: 0, max: 1000, step: 1, value: Math.round(this._sim.frac * 1000),
-      oninput: (e) => { this._sim.frac = e.target.value / 1000; this._sim.play = false; this._sim.completeAt = null; this._syncSimButtons(); this._pushStrip(); } });
+      oninput: (e) => { this._sim.frac = e.target.value / 1000; this._sim.play = false; this._sim.live = false; this._sim.completeAt = null; this._syncSimButtons(); this._pushStrip(); } });
     this._playBtn = h("button", { class: "btn", onclick: () => {
-      this._sim.play = !this._sim.play; this._sim.t0 = 0; this._sim.completeAt = null; this._sim.unavailable = false; this._syncSimButtons();
+      this._sim.play = !this._sim.play; this._sim.live = false; this._sim.t0 = 0; this._sim.completeAt = null; this._sim.unavailable = false; this._syncSimButtons();
     } }, "▶ Play");
+    this._liveBtn = h("button", { class: "btn xs", title: "Make the preview follow the entity's real value",
+      onclick: () => { this._sim.live = !this._sim.live; this._sim.play = false; this._sim.unavailable = false; this._sim.completeAt = null; this._syncSimButtons(); } }, "● Live value");
     this._stripBtn = h("button", { class: "btn", title: "Show this draft on the real LEDs while you edit",
       onclick: () => this._stripPreview(!this._onStrip) }, "💡 Show on strip");
-    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._syncSimButtons(); } }, "Unavailable");
+    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, "Unavailable");
 
     const head = h("div", { class: "sticky" },
       h("div", { class: "rowx", style: "margin-bottom:10px" },
         h("input", { type: "text", class: "grow", style: "font-size:16px;font-weight:600", value: d.name, placeholder: "Bar name",
           oninput: (e) => { d.name = e.target.value; } }),
+        h("label", { class: "rowx sm dim", title: "Turn this bar on or off" }, "Enabled",
+          h("input", { type: "checkbox", class: "sw", checked: !!d.enabled, onchange: (e) => { d.enabled = e.target.checked; this._pushStrip(); } })),
         h("button", { class: "btn", onclick: () => this._closeEditor() }, "Cancel"),
         h("button", { class: "btn pri", onclick: () => this._saveDraft() }, "Save")),
       h("div", { class: "stage" }, pv),
       h("div", { class: "sim" },
         this._playBtn, h("span", { class: "dim sm" }, "Simulate"), this._simRange, this._simOut),
       h("div", { class: "sim", style: "margin-top:6px" },
-        this._stripBtn,
-        h("button", { class: "btn xs", onclick: () => { this._sim.play = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, "🎉 Test completion"),
+        this._stripBtn, this._liveBtn,
+        h("button", { class: "btn xs", onclick: () => { this._sim.play = false; this._sim.live = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, "🎉 Test completion"),
         this._unavBtn,
         h("button", { class: "btn xs", onclick: () => this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }) }, "🔦 Flash these LEDs"))
     );
@@ -676,6 +739,8 @@ class WledBarsPanel extends HTMLElement {
     this._playBtn.classList.toggle("on", this._sim.play);
     this._unavBtn.classList.toggle("on", this._sim.unavailable);
     this._stripBtn.classList.toggle("on", this._onStrip);
+    this._liveBtn.classList.toggle("on", this._sim.live);
+    this._liveBtn.style.display = this._draft && this._draft.source.type === "entity" ? "" : "none";
   }
 
   _closeEditor() {
@@ -699,7 +764,7 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _touch(structural) {
-    if (structural) this._renderForm();
+    if (structural) { this._renderForm(); this._syncSimButtons(); }
     else for (const fn of this._hooks) fn();
     this._pushStrip();
   }
@@ -768,11 +833,38 @@ class WledBarsPanel extends HTMLElement {
     return h("label", { class: "f" + (cls ? " " + cls : "") }, h("span", { class: "fl" }, label, hint && h("small", {}, hint)), control);
   }
 
-  _section(id, icon, title, hint, kids) {
-    return h("details", { open: this._open.has(id),
-      ontoggle: (e) => { if (e.target.open) this._open.add(id); else this._open.delete(id); } },
-      h("summary", {}, h("span", {}, icon), h("span", {}, title), h("small", {}, hint)),
+  _card(step, title, hint, kids) {
+    return h("div", { class: "card bc" },
+      h("div", { class: "bh" }, h("span", { class: "step" }, step), h("span", {}, title), hint && h("small", {}, hint)),
       h("div", { class: "sec" }, kids));
+  }
+
+  _addonCard(def, kids) {
+    const id = def.id;
+    const el = h("details", { class: "addon", open: !this._closed.has(id),
+      ontoggle: (e) => { if (e.target.open) this._closed.delete(id); else this._closed.add(id); } },
+      h("summary", {}, h("span", {}, def.icon), h("span", {}, def.title), h("small", {}, def.hint),
+        h("button", { class: "btn xs danger rm", title: "Remove this from the bar",
+          onclick: (e) => { e.preventDefault(); e.stopPropagation(); def.remove(this._draft); this._added.delete(id); this._touch(true); } }, "✕ Remove")),
+      h("div", { class: "sec" }, kids));
+    if (this._flash === id) {
+      el.classList.add("flash");
+      this._flashEl = el;
+    }
+    return el;
+  }
+
+  _liveValue(bar) {
+    const s = bar.source;
+    if (s.type !== "entity" || !s.entity) return null;
+    const st = this._hass?.states?.[s.entity];
+    if (!st) return null;
+    return E.num(s.attribute ? st.attributes?.[s.attribute] : st.state, null);
+  }
+
+  _liveUnit(bar) {
+    const st = this._hass?.states?.[bar.source.entity];
+    return (!bar.source.attribute && st?.attributes?.unit_of_measurement) || "";
   }
 
   _renderForm() {
@@ -782,6 +874,7 @@ class WledBarsPanel extends HTMLElement {
     form.innerHTML = "";
     this._lists.innerHTML = "";
     this._hooks = [];
+    this._rangeInfo = null;
     const I = (obj, key, type, o) => this._in(obj, key, type, o);
     const F = (...a) => this._f(...a);
     const effect = (obj) => [
@@ -789,7 +882,9 @@ class WledBarsPanel extends HTMLElement {
       obj.effect !== "solid" && F("Cycle time", I(obj, "period", "range", { min: 0.2, max: 5, step: 0.1, unit: " s" }), "Lower = faster"),
     ];
 
-    // --- position ---
+    // ================= basics =================
+
+    // --- 1. where ---
     const pick = h("canvas");
     this._picker = new StripView(pick, {
       labels: true, max: 22,
@@ -797,19 +892,39 @@ class WledBarsPanel extends HTMLElement {
     });
     const posInfo = h("div", { class: "dim sm full" });
     this._hooks.push(() => { posInfo.textContent = `LED ${d.start} → ${d.end} · ${Math.abs(d.end - d.start) + 1} LEDs · green ring = where the bar begins, red ring = where it ends`; });
-    form.append(this._section("pos", "📍", "Position", "Drag across the strip from where the bar begins to where it ends", [
+    form.append(this._card("1", "Where on the strip", "Drag from where the bar begins to where it ends", [
       h("div", { class: "stage full" }, pick), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
       F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 }), "Lower than the start = runs backwards"),
-      F("Fill grows from", I(d, "fill_from", "sel", { options: [["start", "The beginning"], ["end", "The end"], ["center", "The centre outwards"], ["edges", "Both ends inwards"]] })),
-      F("", h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction")),
+      h("div", { class: "full" }, h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction")),
     ]));
 
-    // --- source ---
+    // --- 2. what it shows ---
     const s = d.source;
     const numeric = s.type === "entity" || s.type === "manual";
-    form.append(this._section("src", "📈", "What it shows", SOURCE_TYPES.find((t) => t[0] === s.type)[1], [
-      F("Source", I(s, "type", "sel", { options: SOURCE_TYPES }), null, "full"),
+    const rangeInfo = h("div", { class: "info" });
+    if (numeric) {
+      let last = "";
+      this._rangeInfo = () => {
+        const bar = E.normalizeBar(d);
+        const lo = E.num(s.min, 0), hi = E.num(s.max, 100);
+        const unit = this._liveUnit(bar);
+        const v = this._liveValue(bar);
+        const len = Math.abs(d.end - d.start) + 1;
+        let text;
+        if (lo === hi) text = "Empty and full are the same number, so the bar can't fill. Make them different.";
+        else {
+          text = v !== null
+            ? `Right now ${s.entity} reads ${fmt(v)}${unit}, which lights ${fmt(E.valueToFrac(bar, v) * 100)} % of the bar (about ${Math.round(E.valueToFrac(bar, v) * len)} of ${len} LEDs). `
+            : "";
+          text += `The bar is empty at ${fmt(lo)}${unit} and completely lit at ${fmt(hi)}${unit}; halfway is ${fmt((lo + hi) / 2)}${unit}.`;
+          if (lo > hi) text += " Empty is the higher number, so the bar grows as the reading falls.";
+        }
+        if (text !== last) { last = text; rangeInfo.textContent = text; }
+      };
+    }
+    form.append(this._card("2", "What it shows", null, [
+      F("Follows", I(s, "type", "sel", { options: SOURCE_TYPES }), null, "full"),
       s.type === "entity" && F("Entity", I(s, "entity", "entity", { domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] })),
       s.type === "entity" && F("Attribute", I(s, "attribute", "text", { placeholder: "(state)" }), "Optional, e.g. current_temperature"),
       s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"] })),
@@ -820,14 +935,14 @@ class WledBarsPanel extends HTMLElement {
       s.type === "window" && F("Ends at", I(s, "window_end", "time")),
       s.type === "manual" && h("div", { class: "dim sm full" },
         "Drive this bar from automations: wled_bars.start_timer (bar, duration), wled_bars.set_value (bar, value), wled_bars.stop_timer."),
-      numeric && F("Empty at (0 %)", I(s, "min", "num", { step: "any" })),
-      numeric && F("Full at (100 %)", I(s, "max", "num", { step: "any" })),
-      F("Reverse (drain instead of fill)", I(s, "invert", "tog"), "Countdown style"),
-      F("Glide to new values", I(d, "smoothing", "range", { min: 0, max: 5, step: 0.1, unit: " s" })),
-      F("Smooth leading edge", I(d, "subpixel", "tog"), "Dims the last LED for in-between values"),
+      numeric && h("div", { class: "sub" }, "Range – which readings mean empty and full"),
+      numeric && F("Reading for an empty bar", I(s, "min", "num", { step: "any" }), "At or below this, nothing is lit"),
+      numeric && F("Reading for a full bar", I(s, "max", "num", { step: "any" }), "At or above this, the whole bar is lit"),
+      numeric && rangeInfo,
+      F("Drain instead of fill", I(s, "invert", "tog"), "Starts full and empties (countdown style)"),
     ]));
 
-    // --- colours ---
+    // --- 3. colour ---
     const c = d.color;
     const grad = h("div", { class: "grad full" });
     const stopsBox = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:6px" });
@@ -853,7 +968,7 @@ class WledBarsPanel extends HTMLElement {
           multi && c.stops.length > 1 && h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); c.stops.splice(i, 1); this._touch(true); } }, "✕")));
       });
     }
-    form.append(this._section("col", "🎨", "Colours", "How the lit part is coloured", [
+    form.append(this._card("3", "Colour", null, [
       F("Colour style", I(c, "mode", "sel", { options: [
         ["solid", "One colour"], ["gradient", "Gradient along the bar"], ["steps", "Colour zones along the bar"],
         ["value", "Whole bar changes colour with the value"], ["rainbow", "Rainbow"]] }), null, "full"),
@@ -872,11 +987,19 @@ class WledBarsPanel extends HTMLElement {
       F("Bar brightness", I(d, "brightness", "range", { min: 1, max: 100, unit: " %" })),
     ]));
 
-    // --- tip ---
-    const t = d.tip;
-    form.append(this._section("tip", "✨", "Tip", "The LEDs at the leading edge", [
-      F("Show a tip", I(t, "enabled", "tog")),
-      t.enabled && [
+    // ================= add-ons =================
+
+    const t = d.tip, tr = d.track, tk = d.ticks, a = d.animation, oc = d.on_complete, ua = d.unavailable, v = d.visibility;
+    const cap = (side, label) => {
+      const cp = d.caps[side];
+      return [
+        h("div", { class: "sub" }, label),
+        F("LEDs", I(cp, "count", "num", { min: 0, max: 10, structural: true }), "0 = none"),
+        cp.count > 0 && [F("Colour", I(cp, "color", "color")), F("Brightness", I(cp, "level", "range", { min: 1, max: 100, unit: " %" })), ...effect(cp)],
+      ];
+    };
+    const bodies = {
+      tip: () => [
         F("Tip size (LEDs)", I(t, "count", "num", { min: 1, max: 20 })),
         ...effect(t),
         F("Match the bar colour", I(t, "auto", "tog"), "A brighter tint of the bar"),
@@ -887,99 +1010,120 @@ class WledBarsPanel extends HTMLElement {
         F("Show at 0 %", I(t, "show_at_zero", "tog")),
         F("Hide at 100 %", I(t, "hide_when_full", "tog")),
       ],
-    ]));
-
-    // --- caps ---
-    const cap = (side, label) => {
-      const cp = d.caps[side];
-      return [
-        h("div", { class: "sub" }, label),
-        F("LEDs", I(cp, "count", "num", { min: 0, max: 10, structural: true }), "0 = none"),
-        cp.count > 0 && [F("Colour", I(cp, "color", "color")), F("Brightness", I(cp, "level", "range", { min: 1, max: 100, unit: " %" })), ...effect(cp)],
-      ];
+      caps: () => [...cap("start", "Beginning"), ...cap("end", "End")],
+      track: () => [
+        F("Unlit LEDs show", I(tr, "mode", "sel", { options: [["dim", "A dim version of the bar colour"], ["color", "A fixed colour"]] })),
+        tr.mode === "color" && F("Colour", I(tr, "color", "color")),
+        F("Brightness", I(tr, "level", "range", { min: 1, max: 50, unit: " %" })),
+      ],
+      ticks: () => [
+        F("A mark every", I(tk, "every", "sel", { options: [["50", "50 %"], ["25", "25 %"], ["20", "20 %"], ["10", "10 %"]] })),
+        F("Mark colour", I(tk, "color", "color")),
+        F("Keep marks visible when lit", I(tk, "over", "tog")),
+      ],
+      markers: () => {
+        const mk = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
+        d.markers.forEach((m, i) => {
+          const where = h("span", { class: "dim sm" });
+          this._hooks.push(() => {
+            const bar = E.normalizeBar(d);
+            const mv = m.type === "entity" ? E.num(this._hass?.states?.[m.entity]?.state, null) : E.num(m.value, null);
+            where.textContent = mv === null ? "" : `= ${fmt(E.valueToFrac(bar, mv) * 100)} % along`;
+          });
+          mk.append(h("div", { class: "item" },
+            I(m, "type", "sel", { options: [["value", "At reading"], ["entity", "Follows entity"]] }),
+            m.type === "value" ? I(m, "value", "num", { step: "any" }) : h("span", { class: "grow" }, I(m, "entity", "entity", { domains: ["sensor", "number", "input_number", "climate"] })),
+            where,
+            I(m, "color", "color"), I(m, "effect", "sel", { options: EFFECTS }),
+            h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.markers.splice(i, 1); this._touch(true); } }, "✕")));
+        });
+        return [
+          mk,
+          h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.markers.push(clone(E.DEFAULT_MARKER)); this._touch(true); } }, "+ Add another marker"),
+            h("span", { class: "dim sm", style: "margin-left:8px" }, "A marker is one LED pinned at a reading, in the same units as the range above (e.g. a 21° setpoint on a 15–30° bar).")),
+        ];
+      },
+      peak: () => [
+        F("Peak colour", I(d.peak, "color", "color")),
+        F("Hold for", I(d.peak, "hold", "range", { min: 0, max: 60, unit: " s" })),
+      ],
+      anim: () => [
+        F("Animation", I(a, "type", "sel", { options: [["breathe", "Breathe"], ["flow", "Flow towards the tip"], ["scan", "Scanner sweep (charging)"], ["shimmer", "Shimmer"]] })),
+        F("Cycle time", I(a, "period", "range", { min: 0.3, max: 10, step: 0.1, unit: " s" })),
+        F("Strength", I(a, "depth", "range", { min: 0, max: 100, unit: " %" })),
+        (a.type === "flow" || a.type === "scan") && F("Wave size (LEDs)", I(a, "size", "range", { min: 1, max: 30 })),
+      ],
+      rules: () => {
+        const rl = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
+        d.rules.forEach((r, i) => rl.append(h("div", { class: "item" },
+          h("span", { class: "dim" }, "When"),
+          I(r, "source", "sel", { options: [["percent", "fill %"], ["value", "reading"], ["entity", "entity"]] }),
+          r.source === "entity" && I(r, "entity", "entity", {}),
+          I(r, "op", "sel", { options: OPS }),
+          h("span", { style: "width:90px;display:flex" }, I(r, "value", "text", { placeholder: "value" })),
+          h("span", { class: "dim" }, "→"),
+          I(r, "use_color", "tog"), r.use_color && I(r, "color", "color"),
+          I(r, "effect", "sel", { options: EFFECTS }),
+          r.effect !== "solid" && I(r, "period", "num", { min: 0.2, max: 10, step: 0.1 }),
+          I(r, "scope", "sel", { options: [["fill", "lit part"], ["all", "whole bar"]] }),
+          h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, "✕"))));
+        return [
+          rl,
+          h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.rules.push(clone(E.DEFAULT_RULE)); this._touch(true); } }, "+ Add another alert"),
+            h("span", { class: "dim sm", style: "margin-left:8px" }, "e.g. fill % ≥ 90 → red, blink, whole bar. The switch turns the colour change on or off. Later alerts win.")),
+        ];
+      },
+      done: () => [
+        F("When it reaches 100 %", I(oc, "effect", "sel", { options: [["none", "Nothing special"], ["flash", "Flash"], ["pulse", "Pulse"], ["rainbow", "Rainbow"], ["sparkle", "Sparkle"]] })),
+        oc.effect !== "none" && oc.effect !== "rainbow" && F("Colour", I(oc, "color", "color")),
+        oc.effect !== "none" && F("For", I(oc, "duration", "range", { min: 1, max: 60, unit: " s" })),
+        F("Afterwards", I(oc, "then", "sel", { options: [["hold", "Stay full"], ["hide", "Hide the bar"]] })),
+      ],
+      unavail: () => [
+        h("div", { class: "dim sm full" }, "Without this, the bar simply hides while its source is unavailable."),
+        F("Warning colour", I(ua, "color", "color"), "Slow pulse across the bar"),
+      ],
+      vis: () => [
+        F("Only while this entity…", I(v, "entity", "entity", {}), "e.g. a schedule helper or a status sensor"),
+        F("…is one of", I(v, "states", "text", { placeholder: "on, printing" }), "Comma separated (default: on)"),
+        F("Hide at 0 %", I(v, "hide_at_zero", "tog")),
+        F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
+      ],
+      fill: () => [
+        F("Fill grows from", I(d, "fill_from", "sel", { options: [["start", "The beginning"], ["end", "The end"], ["center", "The centre outwards"], ["edges", "Both ends inwards"]] })),
+        F("Glide to new values", I(d, "smoothing", "range", { min: 0, max: 5, step: 0.1, unit: " s" }), "0 = jump straight there"),
+        F("Smooth leading edge", I(d, "subpixel", "tog"), "Dims the last LED for in-between values"),
+      ],
     };
-    form.append(this._section("caps", "🚩", "Begin & end markers", "Always-on LEDs that show where the bar starts and stops", [
-      ...cap("start", "Beginning"), ...cap("end", "End"),
-    ]));
 
-    // --- track & ticks ---
-    const tr = d.track, tk = d.ticks;
-    form.append(this._section("track", "〰️", "Unlit part & scale", "What the empty part of the bar looks like", [
-      F("Unlit LEDs", I(tr, "mode", "sel", { options: [["off", "Off"], ["dim", "Dim version of the bar colour"], ["color", "A fixed colour"]] })),
-      tr.mode === "color" && F("Colour", I(tr, "color", "color")),
-      tr.mode !== "off" && F("Brightness", I(tr, "level", "range", { min: 1, max: 50, unit: " %" })),
-      F("Scale marks every", I(tk, "every", "sel", { structural: true, options: [["0", "None"], ["50", "50 %"], ["25", "25 %"], ["20", "20 %"], ["10", "10 %"]] })),
-      Number(tk.every) > 0 && F("Mark colour", I(tk, "color", "color")),
-      Number(tk.every) > 0 && F("Keep marks visible when lit", I(tk, "over", "tog")),
-    ]));
-
-    // --- markers & peak ---
-    const mk = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
-    d.markers.forEach((m, i) => mk.append(h("div", { class: "item" },
-      I(m, "type", "sel", { options: [["value", "At value"], ["entity", "Follows entity"]] }),
-      m.type === "value" ? I(m, "value", "num", { step: "any" }) : h("span", { class: "grow" }, I(m, "entity", "entity", { domains: ["sensor", "number", "input_number", "climate"] })),
-      I(m, "color", "color"), I(m, "effect", "sel", { options: EFFECTS }),
-      h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.markers.splice(i, 1); this._touch(true); } }, "✕"))));
-    form.append(this._section("mark", "🎯", "Markers & peak", "Pin a target, setpoint or limit onto the bar", [
-      mk,
-      h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.markers.push(clone(E.DEFAULT_MARKER)); this._touch(true); } }, "+ Add marker"),
-        h("span", { class: "dim sm", style: "margin-left:8px" }, "Marker values use the same units as the source (e.g. °C).")),
-      F("Peak hold", I(d.peak, "enabled", "tog"), "A dot that remembers the highest value"),
-      d.peak.enabled && F("Peak colour", I(d.peak, "color", "color")),
-      d.peak.enabled && F("Hold for", I(d.peak, "hold", "range", { min: 0, max: 60, unit: " s" })),
-    ]));
-
-    // --- animation ---
-    const a = d.animation;
-    form.append(this._section("anim", "🌊", "Motion", "Bring the lit part to life", [
-      F("Animation", I(a, "type", "sel", { options: [["none", "None"], ["breathe", "Breathe"], ["flow", "Flow towards the tip"], ["scan", "Scanner sweep (charging)"], ["shimmer", "Shimmer"]] })),
-      a.type !== "none" && F("Cycle time", I(a, "period", "range", { min: 0.3, max: 10, step: 0.1, unit: " s" })),
-      a.type !== "none" && F("Strength", I(a, "depth", "range", { min: 0, max: 100, unit: " %" })),
-      (a.type === "flow" || a.type === "scan") && F("Wave size (LEDs)", I(a, "size", "range", { min: 1, max: 30 })),
-    ]));
-
-    // --- rules ---
-    const rl = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:8px" });
-    d.rules.forEach((r, i) => rl.append(h("div", { class: "item" },
-      h("span", { class: "dim" }, "When"),
-      I(r, "source", "sel", { options: [["percent", "fill %"], ["value", "value"], ["entity", "entity"]] }),
-      r.source === "entity" && I(r, "entity", "entity", {}),
-      I(r, "op", "sel", { options: OPS }),
-      h("span", { style: "width:90px;display:flex" }, I(r, "value", "text", { placeholder: "value" })),
-      h("span", { class: "dim" }, "→"),
-      I(r, "use_color", "tog"), r.use_color && I(r, "color", "color"),
-      I(r, "effect", "sel", { options: EFFECTS }),
-      r.effect !== "solid" && I(r, "period", "num", { min: 0.2, max: 10, step: 0.1 }),
-      I(r, "scope", "sel", { options: [["fill", "lit part"], ["all", "whole bar"]] }),
-      h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, "✕"))));
-    form.append(this._section("rules", "⚠️", "Alerts & overrides", "Change colour or flash when a condition is met (later rules win)", [
-      rl,
-      h("div", { class: "full" }, h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); d.rules.push(clone(E.DEFAULT_RULE)); this._touch(true); } }, "+ Add rule"),
-        h("span", { class: "dim sm", style: "margin-left:8px" }, "e.g. fill % ≥ 90 → red, blink, whole bar. The toggle switches the colour override on/off.")),
-    ]));
-
-    // --- completion / unavailable ---
-    const oc = d.on_complete, ua = d.unavailable;
-    form.append(this._section("done", "🎉", "Finished & unavailable", "What happens at 100 % and when the source goes offline", [
-      F("When it reaches 100 %", I(oc, "effect", "sel", { options: [["none", "Nothing special"], ["flash", "Flash"], ["pulse", "Pulse"], ["rainbow", "Rainbow"], ["sparkle", "Sparkle"]] })),
-      oc.effect !== "none" && oc.effect !== "rainbow" && F("Colour", I(oc, "color", "color")),
-      oc.effect !== "none" && F("For", I(oc, "duration", "range", { min: 1, max: 60, unit: " s" })),
-      F("Afterwards", I(oc, "then", "sel", { options: [["hold", "Stay full"], ["hide", "Hide the bar"]] })),
-      F("If the source is unavailable", I(ua, "mode", "sel", { options: [["hide", "Hide the bar"], ["show", "Slow pulse in a warning colour"]] })),
-      ua.mode === "show" && F("Warning colour", I(ua, "color", "color")),
-    ]));
-
-    // --- visibility ---
-    const v = d.visibility;
-    form.append(this._section("vis", "👁️", "When to show", "Only light up when it matters", [
-      F("Enabled", I(d, "enabled", "tog")),
-      F("Only while this entity…", I(v, "entity", "entity", {}), "Optional condition"),
-      v.entity && F("…is one of", I(v, "states", "text", { placeholder: "on, printing" }), "Comma separated (default: on)"),
-      F("Hide at 0 %", I(v, "hide_at_zero", "tog")),
-      F("Hide when idle", I(v, "hide_when_idle", "tog"), "Timer not running, outside the time window…"),
-    ]));
+    const isOn = (def) => def.active(d) || this._added.has(def.id);
+    const on = ADDONS.filter(isOn);
+    const off = ADDONS.filter((def) => !isOn(def));
+    this._flashEl = null;
+    if (on.length) form.append(h("div", { class: "divider" }, h("span", {}, `Added to this bar · ${on.length}`)));
+    for (const def of on) form.append(this._addonCard(def, bodies[def.id]()));
+    form.append(h("div", { class: "card bc tray" },
+      h("div", { class: "bh" }, h("span", { class: "step plus" }, "+"), h("span", {}, on.length ? "Add more" : "Add extras"),
+        h("small", {}, "Optional. Each one can be removed again.")),
+      off.length
+        ? h("div", { class: "addgrid" }, off.map((def) =>
+            h("button", { class: "add", onclick: (e) => {
+              e.preventDefault();
+              def.add(d);
+              this._added.add(def.id);
+              this._closed.delete(def.id);
+              this._flash = def.id;
+              this._touch(true);
+            } }, h("span", { class: "ic" }, def.icon), h("span", {}, h("b", {}, def.title), h("small", {}, def.hint)))))
+        : h("div", { class: "dim sm", style: "padding:0 16px 16px" }, "Everything is already on this bar.")));
 
     for (const fn of this._hooks) fn();
+    if (this._rangeInfo) this._rangeInfo();
+    if (this._flashEl) {
+      const el = this._flashEl;
+      requestAnimationFrame(() => el.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+    }
+    this._flash = null;
   }
 
   // ----- device settings -----
@@ -1048,9 +1192,19 @@ class WledBarsPanel extends HTMLElement {
       if (sim.frac < 1) sim.completeAt = null;
       this._simRange.value = Math.round(sim.frac * 1000);
     }
-    const frac = sim.frac;
     const inv = bar.source.invert;
-    const value = E.fracToValue(bar, inv ? 1 - frac : frac);
+    const liveValue = sim.live && !sim.play && !sim.unavailable ? this._liveValue(bar) : null;
+    if (liveValue !== null) {
+      const lf = E.valueToFrac(bar, liveValue);
+      const next = inv ? 1 - lf : lf;
+      if (next !== sim.frac) {
+        sim.frac = next;
+        this._simRange.value = Math.round(next * 1000);
+        this._pushStrip();
+      }
+    }
+    const frac = sim.frac;
+    const value = liveValue !== null ? liveValue : E.fracToValue(bar, inv ? 1 - frac : frac);
     const states = this._hass?.states || {};
     const getState = (id) => (states[id] ? states[id].state : null);
     const markers = bar.markers.map((m) => {
@@ -1064,7 +1218,9 @@ class WledBarsPanel extends HTMLElement {
       else if (now - this._simPeakAt > E.num(bar.peak.hold, 5)) this._simPeak = Math.max(frac, this._simPeak - 0.007);
     }
     const numeric = bar.source.type === "entity" || bar.source.type === "manual";
-    this._simOut.textContent = sim.unavailable ? "unavailable" : `${fmt(frac * 100)} %` + (numeric ? `  ·  ${fmt(value)}` : "");
+    const unit = numeric ? this._liveUnit(bar) : "";
+    this._simOut.textContent = sim.unavailable ? "unavailable"
+      : (liveValue !== null ? "live · " : "") + `${fmt(frac * 100)} %` + (numeric ? `  ·  ${fmt(value)}${unit}` : "");
     return {
       t: now, frac, brightness: 1,
       rule: E.pickRule(bar, value, frac * 100, getState),
@@ -1082,7 +1238,8 @@ class WledBarsPanel extends HTMLElement {
       const px = E.renderBar(bar, this._simCtx(bar, now));
       this._preview.pixels = px;
       this._preview.draw();
-      if (this._picker && this._open.has("pos")) {
+      if (this._rangeInfo) this._rangeInfo();
+      if (this._picker) {
         const n = this._device.led_count;
         const all = new Array(n).fill([0, 0, 0]);
         E.barLeds(bar).forEach((idx, i) => { if (idx < n) all[idx] = px[i]; });

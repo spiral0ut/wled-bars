@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: first build (0.1.0).** The render engine, the frame/transport logic and the editor UI are tested (see [Testing](#testing)), but this version has not yet been run inside a real Home Assistant install or against physical WLED hardware. Expect to find rough edges on first install.
+> **Status: early build (0.2.0).** The render engine, the frame/transport logic and the editor UI are tested (see [Testing](#testing)), but this version has not yet been run inside a real Home Assistant install or against physical WLED hardware. Expect to find rough edges on first install.
 
 ## What a bar can do
 
@@ -34,6 +34,8 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 
 ## Using it
 
+- **Three basics, then add-ons:** every bar starts with just *Where on the strip*, *What it shows* and *Colour*. Everything else (flashing tip, begin & end markers, scale marks, target markers, motion, alerts, finish celebration, show-only-when…) is an add-on you attach from the *Add extras* tray and can remove again. Templates come with the add-ons that suit them already attached.
+- **Range:** for a sensor, set the reading that means an empty bar and the reading that means a full bar; the editor tells you what the current reading lights up, and the preview follows the live value until you drag *Simulate*.
 - **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip from where the bar should begin to where it should end.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
