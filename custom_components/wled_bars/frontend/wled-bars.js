@@ -978,6 +978,7 @@ class WledBarsPanel extends HTMLElement {
     this._startAdded = null;
     this._showRange = false;
     this._moreOpen = new Set();
+    this._srcEntity = undefined;
     this._scale = null;
     this._render();
     window.scrollTo?.(0, 0);
@@ -1556,7 +1557,31 @@ class WledBarsPanel extends HTMLElement {
     const sourceTypes = kind.sources ? SOURCE_TYPES.filter((x) => kind.sources.includes(x[0]) || x[0] === s.type) : SOURCE_TYPES;
     const isTemp = kind.range === "temp";
     const deg = isTemp ? "°" : "";
-    const needsAttr = s.type === "entity" && (!!s.attribute || (!!s.entity && !/^(sensor|number|input_number|counter)\./.test(s.entity)));
+    // attributes of the chosen entity that hold a number, for the attribute dropdown
+    const srcState = s.type === "entity" ? this._hass?.states?.[s.entity] : null;
+    const numAttrs = srcState
+      ? Object.entries(srcState.attributes || {}).filter(([k, val]) => typeof val !== "boolean" && E.num(val, null) !== null && !/^supported_/.test(k))
+      : [];
+    // switching to an entity that lacks the chosen attribute falls back to its state
+    if (this._srcEntity !== undefined && this._srcEntity !== s.entity && srcState && s.attribute && !(s.attribute in (srcState.attributes || {}))) s.attribute = "";
+    this._srcEntity = s.entity;
+    if (srcState && !s.attribute && E.num(srcState.state, null) === null && numAttrs.length) {
+      // the state itself isn't a number (e.g. a thermostat's "heat"): start on the most likely attribute
+      const likely = ["current_temperature", "temperature", "battery_level", "current_position", "percentage", "brightness", "volume_level", "current_humidity", "humidity"];
+      s.attribute = (likely.find((k) => numAttrs.some(([name]) => name === k)) || numAttrs[0][0]);
+    }
+    const needsAttr = s.type === "entity" && (!!s.attribute || numAttrs.length > 0);
+    let attrControl = null;
+    if (needsAttr) {
+      if (srcState) {
+        const stateIsNumber = E.num(srcState.state, null) !== null;
+        const opts = [["", `Its state (${srcState.state}${srcState.attributes?.unit_of_measurement || ""})${stateIsNumber ? "" : " – not a number"}`]]
+          .concat(numAttrs.map(([k, val]) => [k, `${k.replace(/_/g, " ")} (${val})`]));
+        if (s.attribute && !numAttrs.some(([k]) => k === s.attribute)) opts.push([s.attribute, `${s.attribute} – not available on this entity`]);
+        attrControl = h("select", { onchange: (e) => { s.attribute = e.target.value; this._scale = null; this._touch(true); } },
+          opts.map(([val, label]) => h("option", { value: val, selected: (s.attribute || "") === val }, label)));
+      } else attrControl = I(s, "attribute", "text", { placeholder: "(state)" });
+    }
     // 0–100 sources don't need a range unless the user asks for one
     const plainPercent = kind.range === "percent" && Number(s.min) === 0 && Number(s.max) === 100 && !this._showRange;
     const rangeNow = h("div", { class: "dim sm full" });
@@ -1604,7 +1629,7 @@ class WledBarsPanel extends HTMLElement {
           prefer: kindId === "temperature" || kindId === "battery" ? (st) => st.attributes?.device_class === kindId : null,
           domains: ["sensor", "number", "input_number", "counter", "climate", "light", "fan", "media_player", "cover", "weather", "humidifier", "water_heater", "vacuum"] }),
         s.entity ? (this._hass?.states?.[s.entity]?.attributes?.friendly_name || (this._hass?.states?.[s.entity] ? null : "No entity with this id")) : "Type part of its name", "full"),
-      needsAttr && F("Attribute", I(s, "attribute", "text", { placeholder: "(state)" }), "e.g. current_temperature", "full"),
+      needsAttr && F("Use", attrControl, "Which of this entity's numbers to show", "full"),
       s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"], rerender: true }), null, "full"),
       s.type === "timestamp" && F("Finish time", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "A sensor that says when it will be done", "full"),
       s.type === "timestamp" && this._more("finish", [

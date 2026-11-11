@@ -18,7 +18,7 @@ const states = {
   "sensor.printer_progress": { state: "0", attributes: { friendly_name: "Printer progress", unit_of_measurement: "%" } },
   "sensor.living_room_temperature": { state: "71.4", attributes: { friendly_name: "Living room temperature", unit_of_measurement: "°F", device_class: "temperature" } },
   "sensor.phone_battery": { state: "12", attributes: { friendly_name: "Phone battery", unit_of_measurement: "%", device_class: "battery" } },
-  "climate.living_room": { state: "heat", attributes: { friendly_name: "Thermostat", temperature: 22 } },
+  "climate.living_room": { state: "heat", attributes: { friendly_name: "Thermostat", temperature: 70, current_temperature: 72.5, current_humidity: 41, min_temp: 45, max_temp: 95, hvac_modes: ["heat", "cool", "off"], supported_features: 387 } },
   "input_number.target_temperature": { state: "70", attributes: { friendly_name: "Target temperature" } },
   "timer.kitchen": { state: "idle", attributes: { friendly_name: "Kitchen timer" } },
   "binary_sensor.printer_printing": { state: "on", attributes: { friendly_name: "Printer printing" } },
