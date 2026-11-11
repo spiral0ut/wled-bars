@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.2.1).** The render engine, the frame/transport logic and the editor UI are tested (see [Testing](#testing)), but this version has not yet been run inside a real Home Assistant install or against physical WLED hardware. Expect to find rough edges on first install.
+> **Status: early build (0.2.2).** The render engine, the frame/transport logic and the editor UI are tested (see [Testing](#testing)), but this version has not yet been run inside a real Home Assistant install or against physical WLED hardware. Expect to find rough edges on first install.
 
 ## What a bar can do
 

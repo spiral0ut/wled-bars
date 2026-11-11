@@ -23,6 +23,56 @@ const h = (tag, props, ...kids) => {
   return el;
 };
 const clone = (v) => JSON.parse(JSON.stringify(v));
+
+// ---------- icons: one-colour line drawings that take the text colour ----------
+
+const ICONS = {
+  print: "M7 9V4h10v5M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v6H7z",
+  temperature: "M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0zM12 10v7",
+  battery: "M4 8h13a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2zM22 11v2M6 11v2M9.5 11v2",
+  timer: "M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 9v4l2.5 2M9.5 2h5",
+  washer: "M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM12 18a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM7.5 6.5h.01M10.5 6.5h.01",
+  sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  level: "M5 20v-4M10 20v-8M15 20V8M20 20V4",
+  blank: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM12 8v8M8 12h8",
+  tip: "M13 2L4 14h7l-1 8 9-12h-7l1-8z",
+  caps: "M5 21V4M5 4h12l-2.5 4L17 12H5",
+  track: "M3 12h7M13.5 12h.01M17 12h.01M20.5 12h.01",
+  ticks: "M3 8h18v8H3zM7 8v3M11 8v4M15 8v3",
+  markers: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 12h.01",
+  peak: "M5 4h14M12 20V9M7 13l5-5 5 5",
+  anim: "M2 9c2.5-3 5-3 7.5 0s5 3 7.5 0 3.5-2 5-1M2 16c2.5-3 5-3 7.5 0s5 3 7.5 0 3.5-2 5-1",
+  rules: "M12 3L2 20h20L12 3zM12 10v4M12 17h.01",
+  done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l3 3 5-6",
+  unavail: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM5.6 5.6l12.8 12.8",
+  vis: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  fill: "M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4",
+  settings: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
+  presets: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7",
+  clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2",
+  toggle: "M8 7h8a5 5 0 0 1 0 10H8A5 5 0 0 1 8 7zM16 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  number: "M5 9h14M5 15h14M10 4L8 20M16 4l-2 16",
+  play: "M7 4l13 8-13 8V4z",
+  pause: "M8 4v16M16 4v16",
+  bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z",
+  find: "M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM12 2v4M12 18v4M2 12h4M18 12h4",
+  flip: "M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4",
+  undo: "M4 9h10a6 6 0 0 1 0 12H9M8 5L4 9l4 4",
+  x: "M6 6l12 12M18 6L6 18",
+  grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+};
+const ic = (name, size = 16) => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("class", "i" + (name === "grip" ? " dots" : ""));
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", ICONS[name] || ICONS.blank);
+  svg.append(path);
+  return svg;
+};
 const fmt = (v) => (Math.round(v * 100) / 100).toString();
 const hexToPixels = (hex) => {
   const out = [];
@@ -164,7 +214,7 @@ const evenStops = (colors) =>
 
 const TEMPLATES = [
   {
-    icon: "🖨️", name: "Print / job progress",
+    icon: "print", name: "Print / job progress",
     desc: "0–100 % sensor, glowing tip, rainbow when done.",
     bar: {
       name: "Print progress", kind: "progress",
@@ -177,7 +227,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "🌡️", name: "Temperature gauge",
+    icon: "temperature", name: "Temperature gauge",
     desc: "Whole bar changes colour from cold to hot.",
     bar: {
       name: "Temperature", kind: "temperature",
@@ -190,7 +240,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "🔋", name: "Battery level",
+    icon: "battery", name: "Battery level",
     desc: "Red → green zones, blinks red when low.",
     bar: {
       name: "Battery", kind: "battery",
@@ -200,7 +250,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "⏲️", name: "Countdown timer",
+    icon: "timer", name: "Countdown timer",
     desc: "Drains as a timer helper runs down; flashes when finished.",
     bar: {
       name: "Timer", kind: "countdown",
@@ -212,7 +262,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "🧺", name: "Finishes at… (washer, dryer, oven)",
+    icon: "washer", name: "Finishes at… (washer, dryer, oven)",
     desc: "Fills until a timestamp sensor's finish time.",
     bar: {
       name: "Laundry", kind: "finish",
@@ -223,7 +273,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "☀️", name: "Day progress",
+    icon: "sun", name: "Day progress",
     desc: "Fills through a daily time window, with hour ticks.",
     bar: {
       name: "Day", kind: "day",
@@ -235,7 +285,7 @@ const TEMPLATES = [
     },
   },
   {
-    icon: "📶", name: "Level meter (from centre)",
+    icon: "level", name: "Level meter (from centre)",
     desc: "Grows outward from the middle, with peak hold.",
     bar: {
       name: "Level", kind: "level",
@@ -246,7 +296,7 @@ const TEMPLATES = [
       smoothing: 0.2,
     },
   },
-  { icon: "✨", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
+  { icon: "blank", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
 ];
 const presetKey = (tpl) => tpl.bar.kind || "blank";
 
@@ -257,33 +307,33 @@ const newMarker = (d) => ({ ...clone(E.DEFAULT_MARKER), type: "value", color: "#
 // can be attached to a bar and removed again. `active` reads the bar itself,
 // so saved bars and templates show the add-ons they already use.
 const ADDONS = [
-  { id: "tip", icon: "✨", title: "Flashing tip", hint: "Bright or blinking LEDs at the leading edge",
+  { id: "tip", icon: "tip", title: "Flashing tip", hint: "Bright or blinking LEDs at the leading edge",
     active: (d) => !!d.tip.enabled, add: (d) => { d.tip.enabled = true; }, remove: (d) => { d.tip.enabled = false; } },
-  { id: "caps", icon: "🚩", title: "Begin & end markers", hint: "Always-on LEDs showing where the bar starts and stops",
+  { id: "caps", icon: "caps", title: "Begin & end markers", hint: "Always-on LEDs showing where the bar starts and stops",
     active: (d) => d.caps.start.count > 0 || d.caps.end.count > 0,
     add: (d) => { d.caps.start.count = 1; d.caps.end.count = 1; }, remove: (d) => { d.caps.start.count = 0; d.caps.end.count = 0; } },
-  { id: "track", icon: "〰️", title: "Ghost of the unlit part", hint: "Faintly light the empty part of the bar",
+  { id: "track", icon: "track", title: "Ghost of the unlit part", hint: "Faintly light the empty part of the bar",
     active: (d) => d.track.mode !== "off", add: (d) => { d.track.mode = "dim"; }, remove: (d) => { d.track.mode = "off"; } },
-  { id: "ticks", icon: "📏", title: "Scale marks", hint: "Small marks every 10–50 % along the bar",
+  { id: "ticks", icon: "ticks", title: "Scale marks", hint: "Small marks every 10–50 % along the bar",
     active: (d) => Number(d.ticks.every) > 0, add: (d) => { d.ticks.every = 25; }, remove: (d) => { d.ticks.every = 0; } },
-  { id: "markers", icon: "🎯", title: "Target marker", hint: "Pin a setpoint, limit or another entity onto the bar",
+  { id: "markers", icon: "markers", title: "Target marker", hint: "Pin a setpoint, limit or another entity onto the bar",
     active: (d) => d.markers.length > 0, add: (d) => { if (!d.markers.length) d.markers.push(newMarker(d)); }, remove: (d) => { d.markers = []; } },
-  { id: "peak", icon: "📌", title: "Peak hold", hint: "A dot that remembers the highest value",
+  { id: "peak", icon: "peak", title: "Peak hold", hint: "A dot that remembers the highest value",
     active: (d) => !!d.peak.enabled, add: (d) => { d.peak.enabled = true; }, remove: (d) => { d.peak.enabled = false; } },
-  { id: "anim", icon: "🌊", title: "Motion", hint: "Breathe, flow, scanner or shimmer on the lit part",
+  { id: "anim", icon: "anim", title: "Motion", hint: "Breathe, flow, scanner or shimmer on the lit part",
     active: (d) => d.animation.type !== "none", add: (d) => { d.animation.type = "flow"; }, remove: (d) => { d.animation.type = "none"; } },
-  { id: "rules", icon: "⚠️", title: "Alerts", hint: "Change colour or flash when a condition is met",
+  { id: "rules", icon: "rules", title: "Alerts", hint: "Change colour or flash when a condition is met",
     active: (d) => d.rules.length > 0, add: (d) => { if (!d.rules.length) d.rules.push(clone(E.DEFAULT_RULE)); }, remove: (d) => { d.rules = []; } },
-  { id: "done", icon: "🎉", title: "Finish celebration", hint: "Flash, sparkle or hide when it reaches 100 %",
+  { id: "done", icon: "done", title: "Finish celebration", hint: "Flash, sparkle or hide when it reaches 100 %",
     active: (d) => d.on_complete.effect !== "none" || d.on_complete.then === "hide",
     add: (d) => { d.on_complete.effect = "flash"; }, remove: (d) => { d.on_complete.effect = "none"; d.on_complete.then = "hold"; } },
-  { id: "unavail", icon: "🚫", title: "Offline warning", hint: "Pulse a warning colour when the source is unavailable",
+  { id: "unavail", icon: "unavail", title: "Offline warning", hint: "Pulse a warning colour when the source is unavailable",
     active: (d) => d.unavailable.mode === "show", add: (d) => { d.unavailable.mode = "show"; }, remove: (d) => { d.unavailable.mode = "hide"; } },
-  { id: "vis", icon: "👁️", title: "Show only when…", hint: "Times of day, days of the week, or what another entity is doing",
+  { id: "vis", icon: "vis", title: "Show only when…", hint: "Times of day, days of the week, or what another entity is doing",
     active: (d) => d.visibility.conditions.length > 0 || !!d.visibility.hide_at_zero || !d.visibility.hide_when_idle,
     add: (d) => { if (!d.visibility.conditions.length) d.visibility.conditions.push(NEW_CONDITION.time()); },
     remove: (d) => { Object.assign(d.visibility, { entity: "", states: "", hide_at_zero: false, hide_when_idle: true, match: "all", conditions: [] }); } },
-  { id: "fill", icon: "↔️", title: "Fill direction & smoothing", hint: "Grow from the centre or both ends; glide speed",
+  { id: "fill", icon: "fill", title: "Fill direction & smoothing", hint: "Grow from the centre or both ends; glide speed",
     active: (d) => d.fill_from !== "start" || !d.subpixel,
     add: () => {}, remove: (d) => { d.fill_from = "start"; d.subpixel = true; d.smoothing = E.DEFAULT_BAR.smoothing; } },
 ];
@@ -498,7 +548,11 @@ const CSS = `
 .stage{background:var(--wb-stage);border-radius:12px;padding:14px 12px 8px;position:relative}
 .stage canvas{display:block;width:100%}
 button,select,input{font:inherit;color:inherit}
-.btn{border:1px solid var(--wb-line);background:transparent;border-radius:9px;padding:7px 12px;cursor:pointer;white-space:nowrap}
+svg.i{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:-2px}
+svg.i.dots{stroke-width:2.8}
+.btn{border:1px solid var(--wb-line);background:transparent;border-radius:9px;padding:7px 12px;cursor:pointer;white-space:nowrap;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.sic{display:inline-flex;color:var(--wb-accent)}
 .btn:hover{border-color:var(--wb-accent)}
 .btn.pri{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff;font-weight:600}
 .btn.danger:hover{border-color:#ff5d5d;color:#ff5d5d}
@@ -526,7 +580,7 @@ input.sw:checked{background:var(--wb-accent)} input.sw:checked::after{left:18px}
 .tpl{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:10px}
 .tpl button{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:12px;padding:12px;cursor:pointer;
   display:flex;flex-direction:column;gap:4px}
-.tpl button:hover{border-color:var(--wb-accent)} .tpl .ic{font-size:22px}
+.tpl button:hover{border-color:var(--wb-accent)} .tpl .ic{display:flex;color:var(--wb-accent);margin-bottom:4px}
 .editor{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
 .sticky{position:sticky;top:52px;z-index:4;background:var(--wb-card);border:1px solid var(--wb-line);border-radius:14px;padding:12px;
   box-shadow:0 8px 24px rgba(0,0,0,.25)}
@@ -570,7 +624,7 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .add{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:12px;padding:10px 12px;cursor:pointer;display:flex;gap:12px;align-items:center;
   transition:border-color .12s,background .12s,transform .12s}
 .add:hover{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 10%,transparent);transform:translateY(-1px)}
-.add .ic{font-size:20px;flex:none;width:26px;text-align:center}
+.add .ic{display:flex;flex:none;width:26px;justify-content:center;color:var(--wb-accent)}
 .add b{display:block;font-weight:600}
 .add.sel{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 16%,transparent)}
 .add .tick{margin-left:auto;color:var(--wb-accent);font-weight:700;width:14px}
@@ -610,7 +664,7 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .bar[draggable=true]{cursor:default}
 .bar.dragging{opacity:.4}
 .bar.over{outline:2px dashed var(--wb-accent);outline-offset:2px}
-.grip{cursor:grab;color:var(--wb-dim);font-size:16px;line-height:1;padding:0 2px;user-select:none}
+.grip{cursor:grab;color:var(--wb-dim);display:inline-flex;padding:0 2px;user-select:none}
 input.bad{border-color:#ff8a5d}
 .epop{position:fixed;z-index:50;background:var(--wb-card);border:1px solid var(--wb-accent);border-radius:10px;overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}
 .er{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--wb-line)}
@@ -763,10 +817,10 @@ class WledBarsPanel extends HTMLElement {
       );
     }
     if (this._view === "list" && this._device) {
-      top.append(h("button", { class: "btn", onclick: () => this._settingsDialog() }, "⚙ Device settings"));
+      top.append(h("button", { class: "btn", onclick: () => this._settingsDialog() }, ic("settings"), "Device settings"));
     }
     if (this._view === "list") {
-      top.append(h("button", { class: "btn", title: "Choose which extras each preset starts with", onclick: () => this._presetsDialog() }, "🧩 Preset defaults"));
+      top.append(h("button", { class: "btn", title: "Choose which extras each preset starts with", onclick: () => this._presetsDialog() }, ic("presets"), "Preset defaults"));
     }
     root.append(top);
     const wrap = h("div", { class: "wrap" });
@@ -821,7 +875,7 @@ class WledBarsPanel extends HTMLElement {
         h("div", { class: "tpl" },
           TEMPLATES.map((t) =>
             h("button", { onclick: () => this._newBar(t) },
-              h("span", { class: "ic" }, t.icon), h("b", {}, t.name), h("span", { class: "dim sm" }, t.desc)))))
+              h("span", { class: "ic" }, ic(t.icon, 24)), h("b", {}, t.name), h("span", { class: "dim sm" }, t.desc)))))
     );
     this._liveDirty = true;
   }
@@ -856,13 +910,13 @@ class WledBarsPanel extends HTMLElement {
       ondragleave: () => card.classList.remove("over"),
       ondrop: (e) => { e.preventDefault(); card.classList.remove("over"); this._move(this._dragFrom, i); } },
       h("div", { class: "rowx" },
-        h("span", { class: "grip", title: "Drag to reorder. Where bars share LEDs, the one further down the list is drawn on top." }, "⠿"),
+        h("span", { class: "grip", title: "Drag to reorder. Where bars share LEDs, the one further down the list is drawn on top." }, ic("grip", 16)),
         h("span", { style: `width:10px;height:10px;border-radius:50%;background:${this._barColor(i)}` }),
         h("div", { class: "grow name" }, bar.name), pill, pct),
       h("div", { class: "stage", style: "padding:8px 8px 2px" }, canvas),
       h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
         `LED ${bar.start} → ${bar.end} · ${this._sourceText(bar)}`),
-      when && h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, `🕒 Only ${when}`),
+      when && h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, ic("clock", 13), ` Only ${when}`),
       h("div", { class: "rowx" },
         h("button", { class: "btn pri", onclick: () => this._edit(i) }, "Edit"),
         h("button", { class: "btn xs", onclick: () => this._duplicate(i) }, "Duplicate"),
@@ -1001,14 +1055,14 @@ class WledBarsPanel extends HTMLElement {
       oninput: (e) => { this._sim.frac = e.target.value / 1000; this._sim.play = false; this._sim.live = false; this._sim.completeAt = null; this._syncSimButtons(); this._pushStrip(); } });
     this._playBtn = h("button", { class: "btn", onclick: () => {
       this._sim.play = !this._sim.play; this._sim.live = false; this._sim.t0 = 0; this._sim.completeAt = null; this._sim.unavailable = false; this._syncSimButtons();
-    } }, "▶ Play");
+    } }, ic("play", 14), "Play");
     this._liveBtn = h("button", { class: "btn xs", title: "Make the preview follow the entity's real value again",
-      onclick: () => { this._sim.live = true; this._sim.play = false; this._sim.unavailable = false; this._sim.completeAt = null; this._syncSimButtons(); } }, "↺ Back to live value");
+      onclick: () => { this._sim.live = true; this._sim.play = false; this._sim.unavailable = false; this._sim.completeAt = null; this._syncSimButtons(); } }, ic("undo", 13), "Back to live value");
     this._doneBtn = h("button", { class: "btn xs", title: "Preview the finish celebration",
-      onclick: () => { this._sim.play = false; this._sim.live = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, "🎉 Test finish");
+      onclick: () => { this._sim.play = false; this._sim.live = false; this._sim.unavailable = false; this._sim.frac = 1; this._simRange.value = 1000; this._sim.completeAt = performance.now() / 1000; this._syncSimButtons(); } }, ic("done", 13), "Test finish");
     this._stripBtn = h("button", { class: "btn", title: "Show this draft on the real LEDs while you edit",
-      onclick: () => this._stripPreview(!this._onStrip) }, "💡 Show on strip");
-    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, "🚫 Test offline");
+      onclick: () => this._stripPreview(!this._onStrip) }, ic("bulb", 15), "Show on strip");
+    this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, ic("unavail", 13), "Test offline");
 
     this._simExtra = h("div", { class: "sim", style: "margin-top:6px" }, this._liveBtn, this._doneBtn, this._unavBtn);
     this._simRange.title = "Drag to simulate a value";
@@ -1043,7 +1097,7 @@ class WledBarsPanel extends HTMLElement {
 
   _syncSimButtons() {
     if (!this._playBtn) return;
-    this._playBtn.textContent = this._sim.play ? "⏸ Pause" : "▶ Play";
+    this._playBtn.replaceChildren(ic(this._sim.play ? "pause" : "play", 14), this._sim.play ? "Pause" : "Play");
     this._playBtn.classList.toggle("on", this._sim.play);
     this._unavBtn.classList.toggle("on", this._sim.unavailable);
     this._stripBtn.classList.toggle("on", this._onStrip);
@@ -1212,9 +1266,9 @@ class WledBarsPanel extends HTMLElement {
     const id = def.id;
     const el = h("details", { class: "addon", open: !this._closed.has(id),
       ontoggle: (e) => { if (e.target.open) this._closed.delete(id); else this._closed.add(id); } },
-      h("summary", {}, h("span", {}, def.icon), h("span", {}, def.title), h("small", {}, def.hint),
+      h("summary", {}, h("span", { class: "sic" }, ic(def.icon, 18)), h("span", {}, def.title), h("small", {}, def.hint),
         h("button", { class: "btn xs danger rm", title: "Remove this from the bar",
-          onclick: (e) => { e.preventDefault(); e.stopPropagation(); def.remove(this._draft); this._added.delete(id); this._touch(true); } }, "✕ Remove")),
+          onclick: (e) => { e.preventDefault(); e.stopPropagation(); def.remove(this._draft); this._added.delete(id); this._touch(true); } }, ic("x", 12), "Remove")),
       h("div", { class: "sec" }, kids));
     if (this._flash === id) {
       el.classList.add("flash");
@@ -1374,7 +1428,7 @@ class WledBarsPanel extends HTMLElement {
         dot.title = incomplete ? "Choose an entity" : ok ? "True right now" : "Not true right now";
       });
       const remove = h("button", { class: "btn xs danger", title: "Remove this condition",
-        onclick: (e) => { e.preventDefault(); v.conditions.splice(i, 1); this._touch(true); } }, "✕");
+        onclick: (e) => { e.preventDefault(); v.conditions.splice(i, 1); this._touch(true); } }, ic("x", 12));
       if (c.type === "time") {
         if (!Array.isArray(c.days)) c.days = [];
         const tb = this._timeBar(c);
@@ -1390,11 +1444,11 @@ class WledBarsPanel extends HTMLElement {
           return btn;
         }));
         list.append(h("div", { class: "cond" },
-          h("span", { class: "ttl" }, dot, "🕒 ", tb.label), days, remove,
+          h("span", { class: "ttl" }, dot, ic("clock", 16), tb.label), days, remove,
           tb.el, h("div", { class: "tbx" }, ["00", "06", "12", "18", "24"].map((x) => h("span", {}, x)))));
       } else if (c.type === "state") {
         list.append(h("div", { class: "cond" },
-          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, "🔘"),
+          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, ic("toggle", 16)),
           h("span", { class: "grow", style: "display:flex;min-width:160px" }, I(c, "entity", "entity", {})),
           h("select", { onchange: (e) => { c.negate = e.target.value === "1"; this._touch(false); } },
             h("option", { value: "0", selected: !c.negate }, "is"), h("option", { value: "1", selected: !!c.negate }, "is not")),
@@ -1402,16 +1456,16 @@ class WledBarsPanel extends HTMLElement {
           remove));
       } else {
         list.append(h("div", { class: "cond" },
-          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, "🔢"),
+          h("span", { class: "ttl", style: "flex:0 0 auto" }, dot, ic("number", 16)),
           h("span", { class: "grow", style: "display:flex;min-width:160px" }, I(c, "entity", "entity", { domains: ["sensor", "number", "input_number", "counter"] })),
           I(c, "op", "sel", { options: OPS.slice(0, 4) }),
           h("span", { style: "width:90px;display:flex" }, I(c, "value", "text", { placeholder: "value" })),
           remove));
       }
     });
-    const add = (type, label) => h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); v.conditions.push(NEW_CONDITION[type]()); this._touch(true); } }, label);
+    const add = (type, icon, label) => h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); v.conditions.push(NEW_CONDITION[type]()); this._touch(true); } }, ic(icon, 13), label);
     return [
-      h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Add a condition:"), add("time", "🕒 Time of day"), add("state", "🔘 Entity state"), add("numeric", "🔢 Number")),
+      h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Add a condition:"), add("time", "clock", "Time of day"), add("state", "toggle", "Entity state"), add("numeric", "number", "Number")),
       v.conditions.length > 1 && h("div", { class: "rowx full" }, h("span", { class: "dim sm" }, "Show when"),
         h("span", { class: "seg" },
           h("button", { class: v.match !== "any" ? "on" : "", onclick: (e) => { e.preventDefault(); v.match = "all"; this._touch(true); } }, "all of these are true"),
@@ -1489,9 +1543,9 @@ class WledBarsPanel extends HTMLElement {
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
       F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 })),
       h("div", { class: "rowx full" },
-        h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, "⇄ Flip direction"),
+        h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, ic("flip", 15), "Flip direction"),
         h("button", { class: "btn", title: "Blink this range on the real strip so you can find it",
-          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, "🔦 Find on strip")),
+          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, ic("find", 15), "Find on strip")),
     ]));
 
     // --- 2. what it shows ---
@@ -1602,7 +1656,7 @@ class WledBarsPanel extends HTMLElement {
           I(stop, "color", "color"),
           multi && h("span", { class: "grow" }, I(stop, "pos", "range", { min: 0, max: 100, unit: " %" })),
           multi && val,
-          multi && c.stops.length > 1 && h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); c.stops.splice(i, 1); this._touch(true); } }, "✕")));
+          multi && c.stops.length > 1 && h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); c.stops.splice(i, 1); this._touch(true); } }, ic("x", 12))));
       });
     }
     form.append(this._card("3", "Colour", null, [
@@ -1674,7 +1728,7 @@ class WledBarsPanel extends HTMLElement {
             m.type === "value" ? I(m, "value", "num", { step: "any" }) : h("span", { class: "grow" }, I(m, "entity", "entity", { domains: ["sensor", "number", "input_number", "climate"] })),
             where,
             I(m, "color", "color"), I(m, "effect", "sel", { options: EFFECTS }),
-            h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.markers.splice(i, 1); this._touch(true); } }, "✕")));
+            h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); d.markers.splice(i, 1); this._touch(true); } }, ic("x", 12))));
         });
         return [
           mk,
@@ -1702,7 +1756,7 @@ class WledBarsPanel extends HTMLElement {
             I(r, "op", "sel", { options: OPS }),
             h("span", { style: "width:80px;display:flex" }, I(r, "value", "text", { placeholder: "value" })),
             h("span", { class: "grow" }),
-            h("button", { class: "btn xs danger", title: "Remove this alert", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, "✕")),
+            h("button", { class: "btn xs danger", title: "Remove this alert", onclick: (e) => { e.preventDefault(); d.rules.splice(i, 1); this._touch(true); } }, ic("x", 12))),
           h("div", { class: "rowx" },
             h("span", { class: "dim", style: "width:38px" }, "then"),
             I(r, "effect", "sel", { options: EFFECTS }),
@@ -1757,7 +1811,7 @@ class WledBarsPanel extends HTMLElement {
               this._closed.delete(def.id);
               this._flash = def.id;
               this._touch(true);
-            } }, h("span", { class: "ic" }, def.icon), h("span", {}, h("b", {}, def.title), h("small", {}, def.hint)))))
+            } }, h("span", { class: "ic" }, ic(def.icon, 22)), h("span", {}, h("b", {}, def.title), h("small", {}, def.hint)))))
         : h("div", { class: "dim sm", style: "padding:0 16px 16px" }, "Everything is already on this bar.")));
 
     for (const fn of this._hooks) fn();
@@ -1787,14 +1841,14 @@ class WledBarsPanel extends HTMLElement {
           h("div", { class: "dim sm" }, "Choose which extras a new bar starts with under “Added to this bar”. Applies to every strip; bars you already made are not changed.")),
         h("div", { class: "chips", style: "padding:10px 16px 4px" }, TEMPLATES.map((t) =>
           h("button", { class: "chip" + (t === current ? " sel" : ""), style: "padding:5px 12px", onclick: () => { current = t; draw(); } },
-            `${t.icon} ${t.name.replace(/ \(.*\)| \/ job|….*/g, "")}`))),
+            ic(t.icon, 14), t.name.replace(/ \(.*\)| \/ job|….*/g, "")))),
         h("div", { class: "addgrid", style: "grid-template-columns:repeat(auto-fill,minmax(180px,1fr));padding-top:10px" },
           ADDONS.filter((a) => !hide.includes(a.id)).map((a) => {
             const on = chosen.includes(a.id);
             return h("button", { class: "add" + (on ? " sel" : ""), onclick: () => {
               draft[key] = on ? chosen.filter((x) => x !== a.id) : chosen.concat(a.id);
               draw();
-            } }, h("span", { class: "ic" }, a.icon), h("span", {}, h("b", {}, a.title)), h("span", { class: "tick" }, on ? "✓" : ""));
+            } }, h("span", { class: "ic" }, ic(a.icon, 20)), h("span", {}, h("b", {}, a.title)), h("span", { class: "tick" }, on ? "✓" : ""));
           })),
         h("div", { class: "rowx", style: "padding:0 16px 16px" },
           custom ? h("button", { class: "link", onclick: () => { delete draft[key]; draw(); } }, "Reset this preset to built-in")
