@@ -545,29 +545,31 @@ class BarsManager:
             "visible": False,
         }
 
-        def hidden() -> None:
+        def hidden(why: str) -> None:
+            # "why" lets the editor explain a hidden bar in plain words
+            rt.status["why"] = why
             rt.shown = None
             rt.easing = False
             return None
 
         if not self.settings["enabled"] or not bar["enabled"]:
             rt.dist_start = None  # an "auto" trip starts over when the bar next appears
-            return hidden()
+            return hidden("disabled")
 
         vis = bar["visibility"]
         if vis["entity"]:
             current = self._state(vis["entity"])
             allowed = [s.strip().lower() for s in str(vis["states"]).split(",") if s.strip()] or ["on"]
             if current is None or current.lower() not in allowed:
-                return hidden()
+                return hidden("conditions")
         if not self._conditions_ok(vis, utc):
             rt.dist_start = None
-            return hidden()
+            return hidden("conditions")
 
         if state == "unavailable":
             rt.was_full = None
             if bar["unavailable"]["mode"] == "hide":
-                return hidden()
+                return hidden("unavailable")
             rt.status["visible"] = True
             rt.shown = None
             rt.easing = True
@@ -575,10 +577,10 @@ class BarsManager:
 
         if state == "idle" and vis["hide_when_idle"]:
             rt.was_full = None
-            return hidden()
+            return hidden("idle")
         if vis["hide_at_zero"] and frac <= 0.0:
             rt.was_full = False
-            return hidden()
+            return hidden("zero")
 
         # completion: only celebrate when we actually watched it reach 100 %
         full = state == "active" and raw >= 1.0 - 1e-6
@@ -590,7 +592,7 @@ class BarsManager:
         age = now - rt.complete_since if rt.complete_since is not None else None
         celebrating = age is not None and age < self._celebration_seconds(bar)
         if full and bar["on_complete"]["then"] == "hide" and not celebrating:
-            return hidden()
+            return hidden("finished")
 
         # smoothing
         dt = 0.0 if rt.last_t is None else min(1.0, max(0.0, now - rt.last_t))

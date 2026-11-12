@@ -280,6 +280,7 @@ async def main():
     await mgr.async_save([timed], None)
     await settle(mgr, fake)
     assert fake.frozen is False, "manual bar is idle (hidden) until started"
+    assert mgr.runtimes[0].status.get("why") == "idle", mgr.runtimes[0].status
     mgr.start_timer(mgr.find_bar("timer"), 1.0)
     await asyncio.sleep(0.6)
     lit = sum(1 for c in fake.leds[10:20] if c and c[0] > 0)
@@ -301,6 +302,15 @@ async def main():
     await settle(mgr, fake)
     status = mgr.runtimes[0].status
     assert 73 <= status["percent"] <= 76, status
+    assert status["visible"] and "why" not in status, status
+    # the status says why a bar is hidden, for the editor's status line
+    await mgr.async_save([dict(drain, enabled=False)], None)
+    await settle(mgr, fake)
+    assert mgr.runtimes[0].status.get("why") == "disabled", mgr.runtimes[0].status
+    await mgr.async_save([dict(drain, visibility={"conditions": [{"type": "state", "entity": "input_boolean.nope", "states": "on"}]})], None)
+    await settle(mgr, fake)
+    assert mgr.runtimes[0].status.get("why") == "conditions", mgr.runtimes[0].status
+    print("ok hidden bars report why")
     print("ok timer entity countdown:", status["percent"], "% left")
 
     # DDP transport

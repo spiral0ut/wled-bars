@@ -58,6 +58,9 @@ const ICONS = {
   find: "M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM12 2v4M12 18v4M2 12h4M18 12h4",
   flip: "M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4",
   undo: "M4 9h10a6 6 0 0 1 0 12H9M8 5L4 9l4 4",
+  redo: "M20 9H10a6 6 0 0 0 0 12h5M16 5l4 4-4 4",
+  zoomin: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6M11 8v6",
+  zoomout: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6",
   distance: "M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
   x: "M6 6l12 12M18 6L6 18",
   grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
@@ -103,7 +106,7 @@ const dragHandle = (el, onStart, onMove, onEnd) => {
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
-      if (onEnd) onEnd();
+      if (onEnd) onEnd(ctx);
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
@@ -161,14 +164,42 @@ const daysText = (days) => {
   if (key === "56") return " weekends";
   return " " + [...days].sort().map((i) => DAY_NAMES[i]).join(" ");
 };
-const condText = (c) => {
+const condText = (c, nm = (id) => id) => {
   if (c.type === "time") {
     const all = parseHM(c.start) === parseHM(c.end);
     return (all ? "all day" : `${c.start}–${c.end}`) + daysText(c.days);
   }
   if (!c.entity) return "";
-  if (c.type === "state") return `${c.entity} ${c.negate ? "is not" : "is"} ${c.states || "on"}`;
-  return `${c.entity} ${(OPS.find((o) => o[0] === c.op) || [0, c.op])[1]} ${c.value}`;
+  if (c.type === "state") return `${nm(c.entity)} ${c.negate ? "is not" : "is"} ${c.states || "on"}`;
+  return `${nm(c.entity)} ${(OPS.find((o) => o[0] === c.op) || [0, c.op])[1]} ${c.value}`;
+};
+
+// When a time condition next becomes true, and how to say it ("18:00", "tomorrow 07:00", "Mon 07:00").
+const nextStart = (c, from = new Date()) => {
+  const st = parseHM(c.start), en = parseHM(c.end);
+  const at = st !== null && en !== null && st !== en ? st : 0;
+  for (let k = 0; k <= 7; k++) {
+    const t = new Date(from.getFullYear(), from.getMonth(), from.getDate() + k, 0, at, 30);
+    if (t > from && condOk(c, () => null, t)) return t;
+  }
+  return null;
+};
+const whenText = (t, from = new Date()) => {
+  const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const days = Math.round((midnight(t) - midnight(from)) / 864e5);
+  const hm = hhmm(t.getHours() * 60 + t.getMinutes());
+  return days === 0 ? hm : days === 1 ? `tomorrow ${hm}` : `${DAY_NAMES[(t.getDay() + 6) % 7]} ${hm}`;
+};
+// Colour part-way between the neighbouring stops, for a stop added by clicking the gradient.
+const mixAt = (stops, pos) => {
+  const st = [...stops].sort((a, b) => a.pos - b.pos);
+  if (pos <= st[0].pos) return st[0].color;
+  if (pos >= st[st.length - 1].pos) return st[st.length - 1].color;
+  const i = st.findIndex((x, k) => k + 1 < st.length && pos <= st[k + 1].pos);
+  const a = hexToPixels(st[i].color.slice(1))[0], b = hexToPixels(st[i + 1].color.slice(1))[0];
+  if (!a || !b) return "#ffffff";
+  const t = (pos - st[i].pos) / Math.max(1e-6, st[i + 1].pos - st[i].pos);
+  return "#" + a.map((v, k) => Math.round(v + (b[k] - v) * t).toString(16).padStart(2, "0")).join("");
 };
 
 // ---------- distance source (mirrors manager.py) ----------
@@ -417,7 +448,8 @@ const presetAddons = (tpl, saved) => {
 class StripView {
   constructor(canvas, opts = {}) {
     this.c = canvas;
-    this.o = Object.assign({ max: 26, min: 9, labels: false }, opts);
+    // zoom: px per LED on one scrolling row (0 = fit the width, wrapping if needed); ruler: LED numbers above
+    this.o = Object.assign({ max: 26, min: 9, labels: false, zoom: 0, ruler: false }, opts);
     this.pixels = [];
     this.ranges = []; // {start, end, color, label}
     this.sel = null; // {start, end}
@@ -429,13 +461,19 @@ class StripView {
     if (this.o.onSelect) {
       // onSelect(lo, hi, done) always reports lo <= hi; direction is the caller's business.
       canvas.style.cursor = "crosshair";
-      canvas.style.touchAction = "none";
-      const zone = (i) => {
+      canvas.style.touchAction = "pan-y";
+      // The ends are easier to grab than one LED: a few pixels either side count too (more for fingers).
+      const zone = (i, e) => {
         if (!this.sel || i === null) return "new";
         const lo = Math.min(this.sel.start, this.sel.end), hi = Math.max(this.sel.start, this.sel.end);
         if (i === lo && i === hi) return "hi";
-        if (i === lo) return "lo";
-        if (i === hi) return "hi";
+        const reach = Math.round((e && e.pointerType === "touch" ? 20 : 7) / this.layout().size);
+        const tol = Math.max(0, Math.min(reach, Math.floor((hi - lo - 1) / 2)));
+        const dLo = i - lo, dHi = hi - i; // both positive inside the bar
+        if (dLo >= 0 && dLo <= tol) return "lo";
+        if (dHi >= 0 && dHi <= tol) return "hi";
+        if (dLo < 0 && -dLo <= reach) return "lo";
+        if (dHi < 0 && -dHi <= reach) return "hi";
         return i > lo && i < hi ? "move" : "new";
       };
       const apply = (i, done) => {
@@ -457,7 +495,7 @@ class StripView {
         if (i === null) return;
         e.preventDefault();
         canvas.setPointerCapture(e.pointerId);
-        const z = zone(i);
+        const z = zone(i, e);
         const lo = this.sel ? Math.min(this.sel.start, this.sel.end) : i, hi = this.sel ? Math.max(this.sel.start, this.sel.end) : i;
         if (z === "move") this._drag = { mode: "move", lo, hi, offset: i - lo };
         else if (z === "lo") this._drag = { mode: "size", anchor: hi };
@@ -468,9 +506,16 @@ class StripView {
       });
       canvas.addEventListener("pointermove", (e) => {
         if (!this._drag) {
-          const z = zone(this.ledAt(e));
+          const z = zone(this.ledAt(e), e);
           canvas.style.cursor = z === "move" ? "grab" : z === "new" ? "crosshair" : "ew-resize";
           return;
+        }
+        const box = this.o.zoom && canvas.parentElement;
+        if (box) {
+          // dragging near the edge of a zoomed strip scrolls it along
+          const r = box.getBoundingClientRect();
+          if (e.clientX > r.right - 28) box.scrollLeft += 14;
+          else if (e.clientX < r.left + 28) box.scrollLeft -= 14;
         }
         const i = this.ledAt(e, true);
         if (i !== null) apply(i, false);
@@ -489,8 +534,14 @@ class StripView {
   }
 
   layout() {
-    const w = Math.max(120, this.c.clientWidth || this.c.parentElement?.clientWidth || 600);
     const n = Math.max(1, this.pixels.length);
+    const top = this.o.ruler ? 14 : 0;
+    const extra = this.o.labels ? 16 : 6;
+    if (this.o.zoom) {
+      const size = this.o.zoom;
+      return { w: n * size, n, size, perRow: n, rows: 1, top, rowH: top + size + extra, x0: 0 };
+    }
+    const w = Math.max(120, this.c.clientWidth || this.c.parentElement?.clientWidth || 600);
     let size = Math.min(this.o.max, w / n);
     let perRow = n;
     if (size < this.o.min) {
@@ -498,8 +549,7 @@ class StripView {
       size = w / perRow;
     }
     const rows = Math.ceil(n / perRow);
-    const extra = this.o.labels ? 16 : 6;
-    return { w, n, size, perRow, rows, rowH: size + extra, x0: (w - size * Math.min(n, perRow)) / 2 };
+    return { w, n, size, perRow, rows, top, rowH: top + size + extra, x0: (w - size * Math.min(n, perRow)) / 2 };
   }
 
   ledAt(e, clampToStrip = false) {
@@ -515,6 +565,8 @@ class StripView {
   }
 
   draw() {
+    const wide = this.o.zoom ? Math.max(1, this.pixels.length) * this.o.zoom + "px" : "";
+    if (this.c.style.width !== wide) this.c.style.width = wide;
     const L = this.layout();
     const dpr = window.devicePixelRatio || 1;
     const hCss = L.rows * L.rowH;
@@ -526,8 +578,23 @@ class StripView {
     const g = this.c.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, L.w, hCss);
-    const pos = (i) => [L.x0 + (i % L.perRow) * L.size + L.size / 2, Math.floor(i / L.perRow) * L.rowH + L.size / 2];
+    const pos = (i) => [L.x0 + (i % L.perRow) * L.size + L.size / 2, Math.floor(i / L.perRow) * L.rowH + L.top + L.size / 2];
     const rad = L.size * 0.34;
+    if (this.o.ruler) {
+      // LED numbers, as often as they fit
+      const step = [1, 2, 5, 10, 20, 25, 50, 100].find((k) => k * L.size >= 30) || 100;
+      g.font = "9.5px system-ui, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "top";
+      for (let i = 0; i < L.n; i += step) {
+        const [x, y] = pos(i);
+        g.fillStyle = "#7c869d";
+        g.fillText(String(i), Math.max(x, 7), y - L.size / 2 - L.top + 1);
+        g.fillStyle = "#3a4152";
+        g.fillRect(x - 0.5, y - L.size / 2 - 3, 1, 3);
+      }
+      g.textAlign = "left";
+    }
     const disp = (v) => Math.round(255 * Math.pow(v / 255, 0.5));
 
     for (let i = 0; i < L.n; i++) {
@@ -561,7 +628,8 @@ class StripView {
         g.font = "10px system-ui, sans-serif";
         g.textBaseline = "top";
         g.fillStyle = "#aab3c5";
-        g.fillText(rg.label, x - L.size / 2 + 2, y + L.size / 2 + 5);
+        // keep the name inside the canvas when its bar starts near the right edge
+        g.fillText(rg.label, Math.max(2, Math.min(x - L.size / 2 + 2, L.w - g.measureText(rg.label).width - 2)), y + L.size / 2 + 5);
       }
     }
 
@@ -581,10 +649,10 @@ class StripView {
         for (const [i, side] of [[lo, -1], [hi, 1]]) {
           if (i >= L.n) continue;
           const [x, y] = pos(i);
-          const hx = x + side * (L.size / 2 - 1.5) - 2;
+          const hx = x + side * (L.size / 2 - 1.5) - 2.5;
           g.beginPath();
-          if (g.roundRect) g.roundRect(hx, y - L.size / 2 + 1, 4, L.size - 2, 2);
-          else g.rect(hx, y - L.size / 2 + 1, 4, L.size - 2);
+          if (g.roundRect) g.roundRect(hx, y - L.size / 2 - 1, 5, L.size + 2, 2.5);
+          else g.rect(hx, y - L.size / 2 - 1, 5, L.size + 2);
           g.fill();
         }
       }
@@ -598,59 +666,80 @@ const CSS = `
 :host{display:block;min-height:100%;background:var(--primary-background-color,#111318);color:var(--primary-text-color,#e6e9ef);
   font-family:var(--paper-font-body1_-_font-family,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);font-size:14px;
   --wb-card:var(--card-background-color,#1b1e26);--wb-line:var(--divider-color,rgba(128,128,128,.25));
-  --wb-dim:var(--secondary-text-color,#9aa3b5);--wb-accent:var(--primary-color,#4f8cff);--wb-stage:#0a0c11}
+  --wb-text:var(--primary-text-color,#e6e9ef);--wb-dim:var(--secondary-text-color,#9aa3b5);
+  --wb-accent:var(--primary-color,#4f8cff);--wb-on-accent:var(--text-primary-color,#fff);
+  --wb-ok:var(--success-color,#3fbf6f);--wb-warn:var(--warning-color,#ffa600);--wb-err:var(--error-color,#e5484d);
+  --wb-field:color-mix(in srgb,var(--wb-text) 7%,transparent);
+  --wb-tint:color-mix(in srgb,var(--wb-accent) 14%,transparent);
+  --wb-r:var(--ha-card-border-radius,12px);--wb-r-sm:8px;--wb-shadow:var(--ha-card-box-shadow,none);
+  --wb-stage:#0a0c11;--wb-t:.16s ease}
 *{box-sizing:border-box}
-.top{display:flex;align-items:center;gap:12px;padding:6px 16px;height:52px;background:var(--app-header-background-color,var(--wb-card));
+.top{display:flex;align-items:center;gap:8px;padding:6px 16px;height:52px;background:var(--app-header-background-color,var(--wb-card));
   color:var(--app-header-text-color,inherit);position:sticky;top:0;z-index:5;border-bottom:1px solid var(--wb-line)}
 .top h1{font-size:18px;font-weight:500;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top .btn{border-color:color-mix(in srgb,currentColor 30%,transparent)}
+.top .btn.pri{background:var(--app-header-text-color,var(--wb-accent));color:var(--app-header-background-color,var(--wb-on-accent));border-color:transparent}
+.top select{color:inherit;border-color:color-mix(in srgb,currentColor 30%,transparent)}
 .wrap{max-width:1100px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
-.card{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:14px;padding:16px}
+.wrap.enter{animation:wbfade .2s ease}
+.card{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:var(--wb-r);padding:16px;box-shadow:var(--wb-shadow)}
 .card h2{margin:0 0 4px;font-size:15px;font-weight:600}
 .dim{color:var(--wb-dim)} .sm{font-size:12px}
-.stage{background:var(--wb-stage);border-radius:12px;padding:14px 12px 8px;position:relative}
+.stage{background:var(--wb-stage);border-radius:var(--wb-r-sm);padding:14px 12px 8px;position:relative}
 .stage canvas{display:block;width:100%}
+.scroller{overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#3a4152 transparent;padding-bottom:4px}
 button,select,input{font:inherit;color:inherit}
+button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--wb-accent);outline-offset:2px}
 svg.i{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:-2px}
 svg.i.dots{stroke-width:2.8}
-.btn{border:1px solid var(--wb-line);background:transparent;border-radius:9px;padding:7px 12px;cursor:pointer;white-space:nowrap;
-  display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn{border:1px solid var(--wb-line);background:transparent;border-radius:var(--wb-r-sm);padding:7px 12px;cursor:pointer;white-space:nowrap;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:border-color var(--wb-t),background var(--wb-t),color var(--wb-t),opacity var(--wb-t)}
 .sic{display:inline-flex;color:var(--wb-accent)}
 .btn:hover{border-color:var(--wb-accent)}
-.btn.pri{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff;font-weight:600}
-.btn.danger:hover{border-color:#ff5d5d;color:#ff5d5d}
-.btn.on{background:color-mix(in srgb,var(--wb-accent) 22%,transparent);border-color:var(--wb-accent)}
+.btn:disabled{opacity:.35;cursor:default;border-color:var(--wb-line)}
+.btn.pri{background:var(--wb-accent);border-color:var(--wb-accent);color:var(--wb-on-accent);font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.danger:hover{border-color:var(--wb-err);color:var(--wb-err)}
+.btn.on{background:var(--wb-tint);border-color:var(--wb-accent)}
 .btn.xs{padding:3px 8px;font-size:12px;border-radius:7px}
+.btn.icon{padding:7px 9px}
 .rowx{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .grow{flex:1;min-width:0}
-select,input[type=text],input[type=number],input[type=time]{background:var(--wb-stage);border:1px solid var(--wb-line);border-radius:8px;
-  padding:6px 8px;min-width:0;color:#e6e9ef}
+select,input[type=text],input[type=number],input[type=time]{background:var(--wb-field);border:1px solid var(--wb-line);border-radius:var(--wb-r-sm);
+  padding:6px 8px;min-width:0;color:var(--wb-text);transition:border-color var(--wb-t)}
+select:hover,input[type=text]:hover,input[type=number]:hover,input[type=time]:hover{border-color:color-mix(in srgb,var(--wb-accent) 60%,var(--wb-line))}
 select{max-width:100%}
+select option{background:var(--wb-card);color:var(--wb-text)}
 input[type=number]{width:84px}
-input[type=color]{width:38px;height:30px;padding:0;border:1px solid var(--wb-line);border-radius:8px;background:none;cursor:pointer}
+input[type=color]{width:38px;height:30px;padding:0;border:1px solid var(--wb-line);border-radius:var(--wb-r-sm);background:none;cursor:pointer}
 input[type=range]{accent-color:var(--wb-accent);flex:1;min-width:90px}
-input.sw{appearance:none;width:36px;height:20px;border-radius:20px;background:rgba(128,128,128,.4);position:relative;cursor:pointer;
-  transition:background .15s;flex:none;margin:0}
-input.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+input.sw{appearance:none;width:36px;height:20px;border-radius:20px;background:color-mix(in srgb,var(--wb-text) 28%,transparent);position:relative;cursor:pointer;
+  transition:background var(--wb-t);flex:none;margin:0}
+input.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left var(--wb-t);box-shadow:0 1px 3px rgba(0,0,0,.35)}
 input.sw:checked{background:var(--wb-accent)} input.sw:checked::after{left:18px}
 .bars{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-.bar{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:8px}
-.bar.off{opacity:.55}
+.bar{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:var(--wb-r);padding:12px;display:flex;flex-direction:column;gap:8px;
+  box-shadow:var(--wb-shadow);transition:opacity var(--wb-t),outline-color var(--wb-t),transform var(--wb-t)}
+.bar.off .stage,.bar.off .name{opacity:.55}
 .bar .name{font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .stage canvas{transition:opacity .3s ease}
 .pct{font-variant-numeric:tabular-nums;font-weight:600}
-.pill{font-size:11px;padding:2px 7px;border-radius:20px;border:1px solid var(--wb-line);color:var(--wb-dim)}
-.pill.live{color:#3dff8b;border-color:rgba(61,255,139,.4)} .pill.bad{color:#ff8080;border-color:rgba(255,128,128,.4)}
+.st{display:flex;align-items:center;gap:7px;font-size:12.5px;min-height:18px}
+.st span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tpl{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:10px}
-.tpl button{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:12px;padding:12px;cursor:pointer;
-  display:flex;flex-direction:column;gap:4px}
-.tpl button:hover{border-color:var(--wb-accent)} .tpl .ic{display:flex;color:var(--wb-accent);margin-bottom:4px}
+.tpl button{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:var(--wb-r);padding:12px;cursor:pointer;
+  display:flex;flex-direction:column;gap:4px;transition:border-color var(--wb-t),background var(--wb-t),transform var(--wb-t)}
+.tpl button:hover{border-color:var(--wb-accent);background:var(--wb-tint);transform:translateY(-1px)} .tpl .ic{display:flex;color:var(--wb-accent);margin-bottom:4px}
 .editor{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
-.sticky{position:sticky;top:52px;z-index:4;background:var(--wb-card);border:1px solid var(--wb-line);border-radius:14px;padding:12px;
-  box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.namerow{gap:12px}
+.namerow input[type=text]{font-size:16px;font-weight:600;min-width:150px;flex:1 1 150px;padding:8px 10px}
+.sticky{position:sticky;top:60px;z-index:4;background:var(--wb-card);border:1px solid var(--wb-line);border-radius:var(--wb-r);padding:12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.25);transition:padding var(--wb-t)}
 .sim{display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap}
-details{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:14px;overflow:hidden}
+details{background:var(--wb-card);border:1px solid var(--wb-line);border-radius:var(--wb-r);overflow:hidden;box-shadow:var(--wb-shadow)}
 summary{cursor:pointer;padding:12px 16px;font-weight:600;display:flex;align-items:center;gap:10px;list-style:none}
 summary::-webkit-details-marker{display:none}
-summary::after{content:"▾";margin-left:auto;color:var(--wb-dim);transition:transform .15s}
+summary::after{content:"▾";margin-left:auto;color:var(--wb-dim);transition:transform var(--wb-t)}
 details:not([open]) summary::after{transform:rotate(-90deg)}
 summary small{font-weight:400;color:var(--wb-dim)}
 .sec{padding:4px 16px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px 24px}
@@ -662,85 +751,129 @@ summary small{font-weight:400;color:var(--wb-dim)}
 .rg{display:flex;align-items:center;gap:8px} .rg output{width:44px;text-align:right;font-variant-numeric:tabular-nums;color:var(--wb-dim)}
 .full{grid-column:1/-1}
 .sub{grid-column:1/-1;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--wb-dim);margin-top:6px}
-.grad{height:18px;border-radius:9px;border:1px solid var(--wb-line)}
-.item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid var(--wb-line);border-radius:10px}
+.item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid var(--wb-line);border-radius:var(--wb-r-sm)}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
-.chip{border:1px solid var(--wb-line);border-radius:20px;padding:3px 10px 3px 4px;display:flex;align-items:center;gap:6px;cursor:pointer;background:none;font-size:12px}
+.chip{border:1px solid var(--wb-line);border-radius:20px;padding:3px 10px 3px 4px;display:flex;align-items:center;gap:6px;cursor:pointer;background:none;font-size:12px;
+  transition:border-color var(--wb-t),background var(--wb-t)}
 .chip:hover{border-color:var(--wb-accent)} .chip i{width:34px;height:14px;border-radius:8px;display:block}
 .bc{padding:0}
 .bh{display:flex;align-items:center;gap:10px;padding:14px 16px 8px;font-weight:600;font-size:15px;flex-wrap:wrap}
 .bh small{font-weight:400;font-size:13px;color:var(--wb-dim)}
-.step{width:24px;height:24px;border-radius:50%;background:var(--wb-accent);color:#fff;font-size:13px;display:grid;place-items:center;flex:none}
+.step{width:24px;height:24px;border-radius:50%;background:var(--wb-accent);color:var(--wb-on-accent);font-size:13px;display:grid;place-items:center;flex:none}
 .step.plus{background:transparent;border:1px dashed var(--wb-dim);color:var(--wb-dim)}
-.info{grid-column:1/-1;background:var(--wb-stage);border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.45}
+.info{grid-column:1/-1;background:var(--wb-field);border-radius:var(--wb-r-sm);padding:9px 12px;font-size:12.5px;line-height:1.45}
 .divider{display:flex;align-items:center;gap:12px;color:var(--wb-dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--wb-line)}
 .addon{border-left:3px solid var(--wb-accent);scroll-margin:250px 0 24px}
 .addon summary{flex-wrap:wrap}
 .addon summary .rm{margin-left:auto;opacity:.75} .addon summary .rm:hover{opacity:1}
 .addon summary::after{margin-left:4px}
-.addon.flash{animation:wbflash 1.4s ease-out}
-@keyframes wbflash{0%{box-shadow:0 0 0 3px var(--wb-accent);transform:scale(.985)}30%{transform:none}100%{box-shadow:0 0 0 3px transparent}}
-.tray{border-style:dashed}
+.addon.flash{animation:wbflash 1.2s ease-out}
+.addon.leave{animation:wbout .18s ease forwards;pointer-events:none}
+@keyframes wbflash{0%{box-shadow:0 0 0 3px var(--wb-accent);transform:translateY(8px);opacity:.4}25%{transform:none;opacity:1}100%{box-shadow:0 0 0 3px transparent}}
+@keyframes wbout{to{opacity:0;transform:scale(.98) translateY(-6px)}}
+@keyframes wbfade{from{opacity:.4;transform:translateY(4px)}}
+@keyframes wbup{from{opacity:0;transform:translate(-50%,12px)}}
+.tray{border-style:dashed;box-shadow:none}
 .addgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;padding:4px 16px 16px}
-.add{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:12px;padding:10px 12px;cursor:pointer;display:flex;gap:12px;align-items:center;
-  transition:border-color .12s,background .12s,transform .12s}
-.add:hover{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 10%,transparent);transform:translateY(-1px)}
+.add{text-align:left;border:1px solid var(--wb-line);background:transparent;border-radius:var(--wb-r-sm);padding:10px 12px;cursor:pointer;display:flex;gap:12px;align-items:center;
+  transition:border-color var(--wb-t),background var(--wb-t),transform var(--wb-t)}
+.add:hover{border-color:var(--wb-accent);background:var(--wb-tint);transform:translateY(-1px)}
 .add .ic{display:flex;flex:none;width:26px;justify-content:center;color:var(--wb-accent)}
 .add b{display:block;font-weight:600}
-.add.sel{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 16%,transparent)}
+.add.sel{border-color:var(--wb-accent);background:var(--wb-tint)}
 .add .tick{margin-left:auto;color:var(--wb-accent);font-weight:700;width:14px}
-.chip.sel{border-color:var(--wb-accent);background:color-mix(in srgb,var(--wb-accent) 22%,transparent)}
+.chip.sel{border-color:var(--wb-accent);background:var(--wb-tint)}
 .add small{display:block;color:var(--wb-dim);font-size:11.5px;line-height:1.3;margin-top:2px}
-.map{grid-column:1/-1;position:relative;height:76px;touch-action:none;user-select:none;margin:0 14px}
-.map .tr{position:absolute;left:-14px;right:-14px;top:32px;height:10px;border-radius:6px;background:var(--wb-stage);border:1px solid var(--wb-line)}
+.map{grid-column:1/-1;position:relative;height:76px;touch-action:pan-y;user-select:none;margin:0 14px}
+.map .tr{position:absolute;left:-14px;right:-14px;top:32px;height:10px;border-radius:6px;background:var(--wb-field);border:1px solid var(--wb-line)}
 .map .fl{position:absolute;top:32px;height:10px;border-radius:6px}
 .map .hd{position:absolute;top:22px;width:28px;height:30px;margin-left:-14px;cursor:grab;display:grid;place-items:center;z-index:2}
 .map .hd::after{content:"";width:16px;height:26px;border-radius:8px;background:#fff;border:2px solid var(--wb-accent);box-shadow:0 2px 6px rgba(0,0,0,.4)}
 .map .hd:active{cursor:grabbing}
 .map .lb{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
-.map .lb b{color:var(--primary-text-color,#e6e9ef)}
-.map .now{position:absolute;top:26px;width:2px;height:30px;margin-left:-1px;background:#fff;opacity:.9;z-index:1}
+.map .lb b{color:var(--wb-text)}
+.map .now{position:absolute;top:26px;width:2px;height:30px;margin-left:-1px;background:var(--wb-text);opacity:.9;z-index:1}
 .map .ends{position:absolute;left:-14px;right:-14px;top:58px;display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);opacity:.7;pointer-events:none}
 .map .nl{position:absolute;top:58px;transform:translateX(-50%);font-size:11.5px;white-space:nowrap;color:var(--wb-dim)}
-.tb{position:relative;height:54px;touch-action:none;user-select:none;margin:0 14px;flex:1 1 100%}
-.tb .tr{position:absolute;left:0;right:0;top:22px;height:22px;border-radius:7px;background:var(--wb-stage);border:1px solid var(--wb-line);
+.tb{position:relative;height:54px;touch-action:pan-y;user-select:none;margin:0 14px;flex:1 1 100%}
+.tb .tr{position:absolute;left:0;right:0;top:22px;height:22px;border-radius:7px;background:var(--wb-field);border:1px solid var(--wb-line);
   background-image:repeating-linear-gradient(90deg,transparent 0,transparent calc(25% - 1px),var(--wb-line) calc(25% - 1px),var(--wb-line) 25%)}
 .tb .fl{position:absolute;top:22px;height:22px;background:color-mix(in srgb,var(--wb-accent) 55%,transparent);cursor:grab}
 .tb .hd{position:absolute;top:16px;width:28px;height:34px;margin-left:-14px;cursor:ew-resize;display:grid;place-items:center;z-index:2}
-.tb .hd::after{content:"";width:8px;height:30px;border-radius:5px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.tb .hd::after{content:"";width:8px;height:30px;border-radius:5px;background:#fff;border:1px solid var(--wb-accent);box-shadow:0 2px 6px rgba(0,0,0,.4)}
 .tb .tl{position:absolute;top:0;transform:translateX(-50%);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap;padding:0 3px}
-.tb .now{position:absolute;top:18px;width:2px;height:30px;margin-left:-1px;background:#ffd24d;z-index:1;pointer-events:none}
+.tb .now{position:absolute;top:18px;width:2px;height:30px;margin-left:-1px;background:var(--wb-warn);z-index:1;pointer-events:none}
 .tbx{display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);margin:0 6px;flex:1 1 100%}
-.cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;border:1px solid var(--wb-line);border-radius:12px}
+.cond{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;border:1px solid var(--wb-line);border-radius:var(--wb-r-sm)}
 .cond .ttl{font-weight:600;display:flex;align-items:center;gap:8px;flex:1;min-width:0}
-.dot{width:9px;height:9px;border-radius:50%;background:rgba(128,128,128,.5);flex:none}
-.dot.yes{background:#3dff8b;box-shadow:0 0 6px rgba(61,255,139,.6)}
+.dot{width:9px;height:9px;border-radius:50%;background:color-mix(in srgb,var(--wb-text) 35%,transparent);flex:none}
+.dot.yes{background:var(--wb-ok);box-shadow:0 0 6px color-mix(in srgb,var(--wb-ok) 60%,transparent)}
+.dot.warn{background:var(--wb-warn)} .dot.bad{background:var(--wb-err)}
 .days{display:flex;gap:4px}
-.day{width:28px;height:28px;border-radius:50%;border:1px solid var(--wb-line);background:transparent;cursor:pointer;font-size:12px;padding:0}
-.day.on{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff;font-weight:600}
-.seg{display:inline-flex;border:1px solid var(--wb-line);border-radius:9px;overflow:hidden}
-.seg button{border:0;background:transparent;padding:5px 10px;cursor:pointer;font-size:12.5px}
-.seg button.on{background:var(--wb-accent);color:#fff}
+.day{width:28px;height:28px;border-radius:50%;border:1px solid var(--wb-line);background:transparent;cursor:pointer;font-size:12px;padding:0;
+  transition:background var(--wb-t),border-color var(--wb-t)}
+.day.on{background:var(--wb-accent);border-color:var(--wb-accent);color:var(--wb-on-accent);font-weight:600}
+.day.today:not(.on){border-color:var(--wb-accent)}
+.seg{display:inline-flex;border:1px solid var(--wb-line);border-radius:var(--wb-r-sm);overflow:hidden}
+.seg button{border:0;background:transparent;padding:5px 10px;cursor:pointer;font-size:12.5px;transition:background var(--wb-t)}
+.seg button+button{border-left:1px solid var(--wb-line)}
+.seg button.on{background:var(--wb-accent);color:var(--wb-on-accent)}
 .link{border:0;background:none;color:var(--wb-accent);cursor:pointer;padding:0;font-size:12.5px;text-decoration:underline}
-.bar[draggable=true]{cursor:default}
-.bar.dragging{opacity:.4}
+.bar.dragging{opacity:.45;transform:scale(.98)}
 .bar.over{outline:2px dashed var(--wb-accent);outline-offset:2px}
-.grip{cursor:grab;color:var(--wb-dim);display:inline-flex;padding:0 2px;user-select:none}
-input.bad{border-color:#ff8a5d}
-.epop{position:fixed;z-index:50;background:var(--wb-card);border:1px solid var(--wb-accent);border-radius:10px;overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.grip{cursor:grab;color:var(--wb-dim);display:inline-grid;place-items:center;width:28px;height:28px;margin:-4px -4px -4px -8px;user-select:none;touch-action:none;border-radius:6px}
+.grip:hover{background:var(--wb-field)} .grip:active{cursor:grabbing}
+input.bad{border-color:var(--wb-warn)}
+.epop{position:fixed;z-index:50;background:var(--wb-card);border:1px solid var(--wb-accent);border-radius:var(--wb-r-sm);overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}
 .er{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--wb-line)}
 .er:last-child{border-bottom:0}
-.er:hover,.er.cur{background:color-mix(in srgb,var(--wb-accent) 18%,transparent)}
+.er:hover,.er.cur{background:var(--wb-tint)}
 .en{display:flex;justify-content:space-between;gap:10px} .en b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .en span{color:var(--wb-dim);white-space:nowrap;font-variant-numeric:tabular-nums}
 .ei{font-size:11px;color:var(--wb-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty{text-align:center;padding:28px 12px}
-.banner{background:rgba(255,160,0,.12);border:1px solid rgba(255,160,0,.4);border-radius:10px;padding:8px 12px}
-dialog{background:var(--wb-card);color:inherit;border:1px solid var(--wb-line);border-radius:16px;padding:0;max-width:min(620px,94vw);width:100%}
+.banner{background:color-mix(in srgb,var(--wb-warn) 14%,transparent);border:1px solid color-mix(in srgb,var(--wb-warn) 45%,transparent);border-radius:var(--wb-r-sm);padding:8px 12px}
+dialog{background:var(--wb-card);color:inherit;border:1px solid var(--wb-line);border-radius:var(--wb-r);padding:0;max-width:min(620px,94vw);width:100%}
 dialog::backdrop{background:rgba(0,0,0,.55)}
 dialog .sec{grid-template-columns:1fr}
-@media(max-width:600px){.f{flex-wrap:wrap}.f>.fl{flex:1 0 100%}.wrap{padding:10px}.sticky .nm{flex-basis:100% !important}.sticky .rowx{justify-content:flex-end}}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:60;background:var(--wb-card);color:var(--wb-text);border:1px solid var(--wb-line);
+  border-radius:999px;padding:7px 8px 7px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 10px 30px rgba(0,0,0,.4);max-width:92vw;animation:wbup .2s ease}
+.toast span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tlg{display:grid;grid-template-columns:minmax(80px,150px) minmax(0,1fr);gap:6px 10px;align-items:center;margin-top:12px}
+.tln{display:flex;align-items:center;gap:7px;min-width:0;border:0;background:none;padding:0;cursor:pointer;text-align:left}
+.tln b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .tln:hover b{color:var(--wb-accent)}
+.tln.off{opacity:.5}
+.tlt{position:relative;height:24px;border-radius:6px;background:var(--wb-field);touch-action:pan-y;user-select:none;
+  background-image:repeating-linear-gradient(90deg,transparent 0,transparent calc(12.5% - 1px),var(--wb-line) calc(12.5% - 1px),var(--wb-line) 12.5%)}
+.tlb{position:absolute;top:0;bottom:0;cursor:grab;overflow:hidden;font-size:11px;line-height:24px;padding:0 7px;white-space:nowrap;color:#fff;
+  text-shadow:0 1px 2px rgba(0,0,0,.7);font-variant-numeric:tabular-nums}
+.tlb:active{cursor:grabbing}
+.tlb.na{opacity:.3;background-image:repeating-linear-gradient(135deg,rgba(0,0,0,.35) 0 3px,transparent 3px 7px)}
+.tlany{position:absolute;inset:0;border-radius:6px;font-size:11px;line-height:24px;padding:0 8px;color:var(--wb-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:crosshair}
+.tlany i{position:absolute;inset:0;border-radius:6px;opacity:.22}
+.tlany span{position:relative}
+.tlh{position:absolute;top:-2px;bottom:-2px;width:16px;margin-left:-8px;cursor:ew-resize;z-index:2;display:grid;place-items:center}
+.tlh::after{content:"";width:4px;height:16px;border-radius:3px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.35)}
+.tlo{position:absolute;bottom:0;height:7px;pointer-events:none;z-index:1;border-radius:0 0 6px 6px;
+  background:repeating-linear-gradient(135deg,var(--wb-text) 0 3px,transparent 3px 7px);opacity:.75}
+.tlnew{position:absolute;top:0;bottom:0;border-radius:6px;background:var(--wb-tint);border:1px dashed var(--wb-accent);pointer-events:none}
+.tlnow{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--wb-warn);z-index:3;pointer-events:none}
+.tlx{display:flex;justify-content:space-between;font-size:10.5px;color:var(--wb-dim);font-variant-numeric:tabular-nums}
+.ge{grid-column:1/-1;position:relative;height:60px;margin:0 14px;touch-action:pan-y;user-select:none}
+.ge .gb{position:absolute;left:-14px;right:-14px;top:0;height:28px;border-radius:var(--wb-r-sm);border:1px solid var(--wb-line);cursor:copy}
+.ge .gs{position:absolute;top:16px;width:36px;height:42px;margin-left:-18px;display:grid;place-items:center;cursor:grab;z-index:2;transition:opacity var(--wb-t)}
+.ge .gs i{display:block;width:22px;height:22px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.45),0 2px 6px rgba(0,0,0,.4);transition:transform var(--wb-t),box-shadow var(--wb-t)}
+.ge .gs.sel i{transform:scale(1.18);box-shadow:0 0 0 3px var(--wb-accent),0 2px 6px rgba(0,0,0,.4)}
+.ge .gs.out{opacity:.25}
+.ge .gs:active{cursor:grabbing}
+@media(max-width:600px){.f{flex-wrap:wrap}.f>.fl{flex:1 0 100%}.wrap{padding:10px;gap:12px}.top{padding:6px 8px}.top .lbl{display:none}.top .opt{display:none}
+  .sticky{top:56px;padding:8px}.sticky .stage{padding:10px 8px 4px}.card{padding:12px}.sec{padding:4px 12px 12px}.bh{padding:12px 12px 6px}}
+@media(max-width:700px),(max-height:640px){.sticky.compact .simx,.sticky.compact .wide{display:none !important}.sticky.compact .sim{margin-top:6px}
+  .sticky.compact{padding:6px 8px}.sticky.compact .stage{padding:8px 8px 2px}}
+@media(pointer:coarse){.btn{min-height:40px}.btn.xs{min-height:34px;padding:5px 10px}.day{width:36px;height:36px}.seg button{padding:9px 12px}
+  .grip{width:40px;height:40px}.chip{min-height:32px}input[type=range]{min-height:32px}.tlt{height:32px}.tlb,.tlany{line-height:32px}}
+@media(prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
 `;
 
 // ---------- panel ----------
@@ -765,6 +898,20 @@ class WledBarsPanel extends HTMLElement {
     this._strips = [];
     this._raf = 0;
     this._loaded = false;
+    this._zoomIdx = 0;
+    this._hist = [];
+    this._redo = [];
+    // a drag counts as one undo step, so remember whether a pointer is down
+    this.shadowRoot.addEventListener("pointerdown", () => { this._pointerDown = true; }, true);
+    for (const ev of ["pointerup", "pointercancel"]) this.shadowRoot.addEventListener(ev, () => { this._pointerDown = false; }, true);
+    this._onKey = (e) => {
+      if (this._view !== "edit" || !(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z") return;
+      const el = e.composedPath()[0];
+      // text boxes keep their own undo
+      if (el && el.tagName === "INPUT" && ["text", "number", "time"].includes(el.type)) return;
+      e.preventDefault();
+      if (e.shiftKey) this._redoStep(); else this._undo();
+    };
   }
 
   set hass(hass) {
@@ -789,11 +936,14 @@ class WledBarsPanel extends HTMLElement {
       this._frame(ts / 1000);
     };
     this._raf = requestAnimationFrame(loop);
+    window.addEventListener("keydown", this._onKey);
     if (this._loaded && this._entry && !this._unsub) this._subscribe();
   }
 
   disconnectedCallback() {
     cancelAnimationFrame(this._raf);
+    window.removeEventListener("keydown", this._onKey);
+    this._io?.disconnect();
     this._unsubscribe();
     this._stripPreview(false);
   }
@@ -879,14 +1029,19 @@ class WledBarsPanel extends HTMLElement {
       );
     }
     if (this._view === "list" && this._device) {
-      top.append(h("button", { class: "btn", onclick: () => this._settingsDialog() }, ic("settings"), "Device settings"));
+      top.append(h("button", { class: "btn", title: "Device settings", onclick: () => this._settingsDialog() }, ic("settings"), h("span", { class: "lbl" }, "Device settings")));
     }
     if (this._view === "list") {
-      top.append(h("button", { class: "btn", title: "Choose which extras each preset starts with", onclick: () => this._presetsDialog() }, ic("presets"), "Preset defaults"));
+      top.append(h("button", { class: "btn", title: "Choose which extras each preset starts with", onclick: () => this._presetsDialog() }, ic("presets"), h("span", { class: "lbl" }, "Preset defaults")));
     }
+    this._undoBtn = this._redoBtn = null;
+    if (this._view === "edit") top.append(...this._editorButtons());
     root.append(top);
-    const wrap = h("div", { class: "wrap" });
+    const wrap = h("div", { class: "wrap" + (this._view !== this._shownView ? " enter" : "") });
+    this._shownView = this._view;
     root.append(wrap);
+    if (this._toastEl) root.append(this._toastEl);
+    this._tlNow = [];
     if (!this._device) {
       wrap.append(
         h("div", { class: "card empty" },
@@ -904,7 +1059,7 @@ class WledBarsPanel extends HTMLElement {
   _renderList(wrap) {
     const dev = this._device;
     const canvas = h("canvas");
-    this._liveStrip = new StripView(canvas, { labels: true, max: 22, onClick: (led) => {
+    this._liveStrip = new StripView(canvas, { labels: true, ruler: true, max: 22, onClick: (led) => {
       for (let k = this._bars.length - 1; k >= 0; k--) if (E.barLeds(this._bars[k]).includes(led)) return this._edit(k);
       return null;
     } });
@@ -925,6 +1080,7 @@ class WledBarsPanel extends HTMLElement {
     );
 
     if (this._bars.length) {
+      wrap.append(this._timelineCard());
       const grid = h("div", { class: "bars" });
       this._bars.forEach((bar, i) => grid.append(this._barCard(bar, i)));
       wrap.append(grid);
@@ -960,30 +1116,27 @@ class WledBarsPanel extends HTMLElement {
     const canvas = h("canvas");
     const strip = new StripView(canvas, { max: 16, min: 5 });
     strip.barRef = bar;
+    strip.index = i;
     this._strips.push(strip);
-    const pct = h("span", { class: "pct" }, "–");
-    const pill = h("span", { class: "pill" }, "…");
-    strip.pctEl = pct;
-    strip.pillEl = pill;
-    const when = bar.visibility.conditions.map(condText).filter(Boolean).join(bar.visibility.match === "any" ? "  or  " : "  and  ");
-    const card = h("div", { class: "bar" + (bar.enabled ? "" : " off"), draggable: true,
-      ondragstart: (e) => { this._dragFrom = i; card.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); },
-      ondragend: () => { card.classList.remove("dragging"); this._dragFrom = -1; },
-      ondragover: (e) => { if (this._dragFrom >= 0 && this._dragFrom !== i) { e.preventDefault(); card.classList.add("over"); } },
-      ondragleave: () => card.classList.remove("over"),
-      ondrop: (e) => { e.preventDefault(); card.classList.remove("over"); this._move(this._dragFrom, i); } },
+    strip.pctEl = h("span", { class: "pct" }, "–");
+    strip.dotEl = h("span", { class: "dot" });
+    strip.stEl = h("span", {}, "…");
+    const when = bar.visibility.conditions.map((c) => condText(c, (id) => this._name(id))).filter(Boolean).join(bar.visibility.match === "any" ? "  or  " : "  and  ");
+    const grip = h("span", { class: "grip", title: "Drag to reorder. Where bars share LEDs, the one further down the list is drawn on top." }, ic("grip", 16));
+    const card = h("div", { class: "bar" + (bar.enabled ? "" : " off") },
       h("div", { class: "rowx" },
-        h("span", { class: "grip", title: "Drag to reorder. Where bars share LEDs, the one further down the list is drawn on top." }, ic("grip", 16)),
+        grip,
         h("span", { style: `width:10px;height:10px;border-radius:50%;background:${this._barColor(i)}` }),
-        h("div", { class: "grow name" }, bar.name), pill, pct),
+        h("div", { class: "grow name" }, bar.name), strip.pctEl),
       h("div", { class: "stage", style: "padding:8px 8px 2px" }, canvas),
+      h("div", { class: "st" }, strip.dotEl, strip.stEl),
       h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
         `LED ${bar.start} → ${bar.end} · ${this._sourceText(bar)}`),
       when && h("div", { class: "dim sm", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, ic("clock", 13), ` Only ${when}`),
       h("div", { class: "rowx" },
         h("button", { class: "btn pri", onclick: () => this._edit(i) }, "Edit"),
         h("button", { class: "btn xs", onclick: () => this._duplicate(i) }, "Duplicate"),
-        this._confirmBtn("Delete", "Tap again to delete", "btn xs danger", () => this._delete(i)),
+        h("button", { class: "btn xs danger", onclick: () => this._delete(i) }, "Delete"),
         h("span", { class: "grow" }),
         h("input", { type: "checkbox", class: "sw", title: "Enabled", checked: !!bar.enabled,
           onchange: async (e) => {
@@ -993,6 +1146,228 @@ class WledBarsPanel extends HTMLElement {
             this._render();
           } }))
     );
+    card.dataset.index = i;
+    // reorder by dragging the grip: works with a mouse and with a finger
+    const clear = () => { for (const el of this.shadowRoot.querySelectorAll(".bar.over")) el.classList.remove("over"); };
+    dragHandle(grip, () => { card.classList.add("dragging"); return { to: i }; },
+      (e, ctx) => {
+        const over = this.shadowRoot.elementFromPoint(e.clientX, e.clientY)?.closest?.(".bar");
+        clear();
+        ctx.to = over ? Number(over.dataset.index) : i;
+        if (over && ctx.to !== i) over.classList.add("over");
+      },
+      (ctx) => { card.classList.remove("dragging"); clear(); this._move(i, ctx.to); });
+    return card;
+  }
+
+  _name(id) {
+    return this._hass?.states?.[id]?.attributes?.friendly_name || id;
+  }
+
+  // One line saying what a bar is doing right now, and why if it is hidden.
+  _statusOf(bar, i) {
+    const st = this._live.bars[bar.id];
+    const states = this._hass?.states || {};
+    const nm = (id) => states[id]?.attributes?.friendly_name || id;
+    const getState = (id) => (states[id] ? states[id].state : null);
+    if (!this._settings.enabled) return { tone: "", text: "Off · all bars are switched off" };
+    if (!bar.enabled) return { tone: "", text: "Switched off" };
+    if (!st) return { tone: "", text: "Waiting for the strip…" };
+    if (st.visible) {
+      if (st.state === "unavailable") return { tone: "warn", text: "Showing the offline warning" };
+      const mine = E.barLeds(bar);
+      const cover = new Map();
+      this._bars.forEach((b, k) => {
+        if (k > i && this._live.bars[b.id]?.visible) for (const led of E.barLeds(b)) cover.set(led, b.name);
+      });
+      const hit = mine.filter((led) => cover.has(led));
+      if (!hit.length) return { tone: "yes", text: "Showing" };
+      const by = [...new Set(hit.map((led) => cover.get(led)))].join(", ");
+      return hit.length === mine.length ? { tone: "warn", text: `Covered by ${by}` } : { tone: "yes", text: `Showing · partly covered by ${by}` };
+    }
+    const vis = bar.visibility;
+    const conds = (vis.entity ? [{ type: "state", entity: vis.entity, states: vis.states || "on" }] : []).concat(vis.conditions);
+    const failing = conds.filter((c) => !condOk(c, getState));
+    if (st.why === "conditions" || (!st.why && failing.length)) {
+      const times = failing.filter((c) => c.type === "time").map((c) => nextStart(c)).filter(Boolean).sort((a, b) => a - b);
+      const other = failing.find((c) => c.type !== "time" && c.entity);
+      if (other && !(vis.match === "any" && times.length)) {
+        const cur = getState(other.entity);
+        const unit = other.type === "numeric" ? states[other.entity]?.attributes?.unit_of_measurement || "" : "";
+        return { tone: "", text: cur === null ? `Hidden: ${nm(other.entity)} is missing` : `Hidden: ${nm(other.entity)} is ${cur}${unit}` };
+      }
+      if (times.length) return { tone: "", text: `Hidden until ${whenText(times[0])}` };
+      return { tone: "", text: "Hidden by its conditions" };
+    }
+    if (st.why === "unavailable" || st.state === "unavailable") return { tone: "bad", text: "Hidden: source unavailable" };
+    if (st.why === "zero") return { tone: "", text: "Hidden while at 0 %" };
+    if (st.why === "finished") return { tone: "", text: "Hidden: finished" };
+    const src = bar.source.type;
+    if (src === "timer") return { tone: "", text: "Hidden: timer isn’t running" };
+    if (src === "timestamp") return { tone: "", text: "Hidden: no finish time yet" };
+    if (src === "window") return { tone: "", text: `Hidden until ${bar.source.window_start}` };
+    if (src === "manual") return { tone: "", text: "Hidden: waiting for an automation" };
+    return { tone: "", text: "Hidden: nothing to show" };
+  }
+
+  // Small message at the bottom of the screen, with an Undo button when there is something to undo.
+  _toast(text, undo) {
+    clearTimeout(this._toastTimer);
+    this._toastEl?.remove();
+    const el = h("div", { class: "toast", role: "status" }, h("span", {}, text),
+      undo ? h("button", { class: "btn xs pri", onclick: async () => { this._toastEl = null; el.remove(); await undo(); } }, ic("undo", 13), "Undo") : h("span", { style: "width:8px" }));
+    this._toastEl = el;
+    this.shadowRoot.append(el);
+    this._toastTimer = setTimeout(() => { if (this._toastEl === el) this._toastEl = null; el.remove(); }, 8000);
+  }
+
+  // Save the bar list as it is now and offer to put `before` back.
+  async _commit(before, text) {
+    await this._saveBars(this._bars);
+    this._render();
+    this._toast(text, async () => { await this._saveBars(before); this._render(); });
+  }
+
+  // 24 hours, one row per bar: when each bar may show, and where bars on the same LEDs collide.
+  _timelineCard() {
+    const bars = this._bars;
+    const now = new Date();
+    const today = (now.getDay() + 6) % 7;
+    const day = this._tlDay ?? today;
+    const dateAt = (m) => new Date(2024, 0, 1 + day, 0, m, 30); // 1 Jan 2024 was a Monday
+    const timeConds = (b) => b.visibility.conditions.filter((c) => c && c.type === "time");
+    const timeOn = (b, m) => {
+      const tc = timeConds(b);
+      if (!tc.length) return true;
+      const hits = tc.map((c) => condOk(c, () => null, dateAt(m)));
+      if (b.visibility.match === "any") return b.visibility.conditions.length > tc.length || hits.some(Boolean);
+      return hits.every(Boolean);
+    };
+    const pct = (m) => `${(m / 1440) * 100}%`;
+    const grid = h("div", { class: "tlg" });
+    const paints = [];
+    let striped = false;
+    const repaint = () => { striped = false; for (const fn of paints) fn(); legend.style.display = striped ? "" : "none"; };
+    const legend = h("div", { class: "dim sm", style: "margin-top:8px" }, "Striped: a bar further down the list shares these LEDs and is drawn on top then.");
+    bars.forEach((bar, i) => {
+      const color = this._barColor(i);
+      const track = h("div", { class: "tlt" });
+      const toMin = (e) => {
+        const r = track.getBoundingClientRect();
+        return Math.round((E.clamp((e.clientX - r.left) / r.width) * 1440) / 15) * 15;
+      };
+      const finish = (ctx) => {
+        if (JSON.stringify(ctx.before) !== JSON.stringify(this._bars)) this._commit(ctx.before, `Changed when “${bar.name}” shows`);
+      };
+      const tc = timeConds(bar);
+      if (!tc.length) {
+        const others = bar.visibility.conditions.map((c) => condText(c, (id) => this._name(id))).filter(Boolean);
+        const any = h("div", { class: "tlany", title: "Drag across to limit this bar to certain hours" },
+          h("i", { style: `background:${color}` }),
+          h("span", {}, others.length ? `Whenever ${others.join(bar.visibility.match === "any" ? " or " : " and ")}` : "Any time"));
+        const ghost = h("div", { class: "tlnew", style: "display:none" });
+        const span = (ctx) => [Math.min(ctx.at, ctx.to ?? ctx.at), Math.max(ctx.at, ctx.to ?? ctx.at)];
+        dragHandle(any, (e) => ({ at: toMin(e) }),
+          (e, ctx) => {
+            ctx.to = toMin(e);
+            const [a, b] = span(ctx);
+            ghost.style.display = b - a >= 30 ? "" : "none";
+            ghost.style.left = pct(a);
+            ghost.style.width = pct(b - a);
+          },
+          (ctx) => {
+            ghost.style.display = "none";
+            const [a, b] = span(ctx);
+            if (b - a < 30) return;
+            const before = clone(this._bars);
+            bar.visibility.conditions.push({ type: "time", start: hhmm(a), end: hhmm(b), days: [] });
+            this._commit(before, `“${bar.name}” now shows ${hhmm(a)}–${hhmm(b)}`);
+          });
+        track.append(any, ghost);
+      }
+      for (const c of tc) {
+        const pA = h("div", { class: "tlb", style: `background:${color}` }), pB = h("div", { class: "tlb", style: `background:${color}` });
+        const hS = h("div", { class: "tlh", title: "Drag to change the start" }), hE = h("div", { class: "tlh", title: "Drag to change the end" });
+        paints.push(() => {
+          const st = parseHM(c.start) ?? 0;
+          let en = parseHM(c.end) ?? 0;
+          const allDay = st === en;
+          if (en === 0 && !allDay) en = 1440;
+          const wrap = !allDay && st > en;
+          const dayOk = (x) => !Array.isArray(c.days) || !c.days.length || c.days.includes(x);
+          pA.style.left = allDay ? "0" : pct(st);
+          pA.style.width = allDay ? "100%" : pct((wrap ? 1440 : en) - st);
+          pA.style.borderRadius = wrap ? "6px 0 0 6px" : "6px";
+          pA.classList.toggle("na", !dayOk(day));
+          pA.textContent = allDay ? "All day" : `${c.start}–${c.end}`;
+          pA.title = (allDay ? "All day" : `${c.start}–${c.end}`) + daysText(c.days) + (dayOk(day) ? "" : ` · not on ${DAY_NAMES[day]}`);
+          pB.style.display = wrap ? "" : "none";
+          pB.style.left = "0";
+          pB.style.width = pct(en);
+          pB.style.borderRadius = "0 6px 6px 0";
+          pB.classList.toggle("na", !dayOk((day + 6) % 7));
+          hS.style.display = hE.style.display = allDay ? "none" : "";
+          hS.style.left = pct(st);
+          hE.style.left = pct(en);
+        });
+        const begin = () => ({ before: clone(this._bars) });
+        dragHandle(hS, begin, (e) => { const m = Math.min(toMin(e), 1425); if (m !== (parseHM(c.end) ?? 0)) { c.start = hhmm(m); repaint(); } }, finish);
+        dragHandle(hE, begin, (e) => { const m = toMin(e) % 1440; if (m !== (parseHM(c.start) ?? 0)) { c.end = hhmm(m); repaint(); } }, finish);
+        for (const piece of [pA, pB]) {
+          dragHandle(piece, (e) => ({ before: clone(this._bars), at: toMin(e), st: parseHM(c.start) ?? 0, en: parseHM(c.end) ?? 0 }),
+            (e, ctx) => {
+              if (ctx.st === ctx.en) return; // all day: nothing to slide
+              const delta = toMin(e) - ctx.at;
+              c.start = hhmm(ctx.st + delta);
+              c.end = hhmm(ctx.en + delta);
+              repaint();
+            }, finish);
+        }
+        track.append(pA, pB, hS, hE);
+      }
+      const stripes = h("div");
+      track.append(stripes);
+      paints.push(() => {
+        stripes.replaceChildren();
+        if (!bar.enabled) return;
+        const lo = Math.min(bar.start, bar.end), hi = Math.max(bar.start, bar.end);
+        bars.forEach((other, k) => {
+          if (k <= i || !other.enabled || Math.min(other.start, other.end) > hi || Math.max(other.start, other.end) < lo) return;
+          let from = null;
+          for (let m = 0; m <= 1440; m += 15) {
+            const both = m < 1440 && timeOn(bar, m) && timeOn(other, m);
+            if (both && from === null) from = m;
+            if (!both && from !== null) {
+              stripes.append(h("div", { class: "tlo", style: `left:${pct(from)};width:${pct(m - from)}` }));
+              striped = true;
+              from = null;
+            }
+          }
+        });
+      });
+      if (day === today) {
+        const line = h("div", { class: "tlnow", title: "Now" });
+        this._tlNow.push(line);
+        track.append(line);
+      }
+      grid.append(
+        h("button", { class: "tln" + (bar.enabled ? "" : " off"), title: `Edit ${bar.name}`, onclick: () => this._edit(i) },
+          h("span", { style: `width:10px;height:10px;border-radius:50%;flex:none;background:${color}` }), h("b", {}, bar.name)),
+        track);
+    });
+    grid.append(h("span"), h("div", { class: "tlx" }, ["00", "03", "06", "09", "12", "15", "18", "21", "24"].map((x) => h("span", {}, x))));
+    // days only matter when some bar is limited to certain days
+    const usesDays = bars.some((b) => timeConds(b).some((c) => Array.isArray(c.days) && c.days.length));
+    if (!usesDays) this._tlDay = undefined;
+    const card = h("div", { class: "card" },
+      h("div", { class: "rowx" },
+        h("div", { class: "grow" }, h("h2", {}, "Through the day"),
+          h("div", { class: "dim sm" }, "Drag a block to change when a bar shows, or drag across an empty row to give it hours.")),
+        usesDays && h("div", { class: "days" }, DAY_LETTERS.map((letter, x) =>
+          h("button", { class: "day" + (x === day ? " on" : "") + (x === today ? " today" : ""), title: DAY_NAMES[x] + (x === today ? " (today)" : ""),
+            onclick: () => { this._tlDay = x; this._render(); } }, letter)))),
+      grid, legend);
+    repaint();
     return card;
   }
 
@@ -1044,6 +1419,9 @@ class WledBarsPanel extends HTMLElement {
     this._moreOpen = new Set();
     this._srcEntity = undefined;
     this._scale = null;
+    this._stopSel = 0;
+    this._pickScroll = 0;
+    this._zoomCenter = true;
     this._render();
     window.scrollTo?.(0, 0);
   }
@@ -1098,10 +1476,9 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _delete(i) {
-    const bars = clone(this._bars);
-    bars.splice(i, 1);
-    await this._saveBars(bars);
-    this._render();
+    const before = clone(this._bars);
+    this._bars = before.filter((_b, k) => k !== i);
+    await this._commit(before, `Deleted “${before[i].name}”`);
   }
 
   async _saveSettings(settings) {
@@ -1129,35 +1506,109 @@ class WledBarsPanel extends HTMLElement {
       onclick: () => this._stripPreview(!this._onStrip) }, ic("bulb", 15), "Show on strip");
     this._unavBtn = h("button", { class: "btn xs", onclick: () => { this._sim.unavailable = !this._sim.unavailable; this._sim.play = false; this._sim.live = false; this._syncSimButtons(); } }, ic("unavail", 13), "Test offline");
 
-    this._simExtra = h("div", { class: "sim", style: "margin-top:6px" }, this._liveBtn, this._doneBtn, this._unavBtn);
+    this._stripBtn.classList.add("wide");
+    this._simExtra = h("div", { class: "sim simx", style: "margin-top:6px" }, this._liveBtn, this._doneBtn, this._unavBtn);
     this._simRange.title = "Drag to simulate a value";
     this._draftOrig = JSON.stringify(E.normalizeBar(d));
+    this._nameInput = h("input", { type: "text", value: d.name, placeholder: "Bar name", oninput: (e) => { this._draft.name = e.target.value; } });
+    this._enabledInput = h("input", { type: "checkbox", class: "sw", checked: !!d.enabled,
+      onchange: (e) => { this._draft.enabled = e.target.checked; this._pushStrip(); } });
+    const nameRow = h("div", { class: "rowx namerow" }, this._nameInput,
+      h("label", { class: "rowx sm dim", title: "Turn this bar on or off" }, "Enabled", this._enabledInput));
+    const head = h("div", { class: "sticky" },
+      h("div", { class: "stage" }, pv),
+      h("div", { class: "sim" }, this._playBtn, this._simRange, this._simOut, this._stripBtn),
+      this._simExtra
+    );
+    // On small screens the preview shrinks to the essentials once you scroll past the name.
+    const sentinel = h("div", { style: "height:1px;margin-bottom:-17px" });
+    this._io?.disconnect();
+    this._io = new IntersectionObserver(([en]) => head.classList.toggle("compact", !en.isIntersecting && en.boundingClientRect.top < 120), { rootMargin: "-56px 0px 0px 0px" });
+    this._io.observe(sentinel);
+    this._form = h("div", { class: "editor" });
+    this._lists = h("div", { style: "display:none" });
+    wrap.append(nameRow, sentinel, head, this._form, this._lists);
+    this._renderForm();
+    this._syncSimButtons();
+    // undo history starts after the first draw, which may fill in defaults
+    this._hist = [this._snap()];
+    this._redo = [];
+    this._histSeen = this._hist[0];
+    this._syncHist();
+  }
+
+  // Undo, Redo, Cancel and Save live in the top bar so they are always in reach.
+  _editorButtons() {
+    this._undoBtn = h("button", { class: "btn icon", title: "Undo the last change", disabled: true, onclick: () => this._undo() }, ic("undo", 16));
+    this._redoBtn = h("button", { class: "btn icon opt", title: "Redo", disabled: true, onclick: () => this._redoStep() }, ic("redo", 16));
     let armed = 0;
     const cancel = h("button", { class: "btn", onclick: () => {
       const dirty = JSON.stringify(E.normalizeBar(this._draft)) !== this._draftOrig;
       if (!dirty || armed) { clearTimeout(armed); this._closeEditor(); return; }
-      cancel.textContent = "Discard changes?";
-      cancel.style.borderColor = cancel.style.color = "#ff5d5d";
+      cancel.textContent = "Discard?";
+      cancel.style.borderColor = cancel.style.color = "var(--wb-err)";
       armed = setTimeout(() => { armed = 0; cancel.textContent = "Cancel"; cancel.style.borderColor = cancel.style.color = ""; }, 4000);
     } }, "Cancel");
-    const head = h("div", { class: "sticky" },
-      h("div", { class: "rowx", style: "margin-bottom:10px" },
-        h("input", { type: "text", class: "grow nm", style: "font-size:16px;font-weight:600;min-width:150px;flex-basis:150px", value: d.name, placeholder: "Bar name",
-          oninput: (e) => { d.name = e.target.value; } }),
-        h("label", { class: "rowx sm dim", title: "Turn this bar on or off" }, "Enabled",
-          h("input", { type: "checkbox", class: "sw", checked: !!d.enabled, onchange: (e) => { d.enabled = e.target.checked; this._pushStrip(); } })),
-        cancel,
-        h("button", { class: "btn pri", onclick: () => this._saveDraft() }, "Save")),
-      h("div", { class: "stage" }, pv),
-      h("div", { class: "sim" },
-        this._playBtn, this._simRange, this._simOut, this._stripBtn),
-      this._simExtra
-    );
-    this._form = h("div", { class: "editor" });
-    this._lists = h("div", { style: "display:none" });
-    wrap.append(head, this._form, this._lists);
+    return [this._undoBtn, this._redoBtn, cancel, h("button", { class: "btn pri", onclick: () => this._saveDraft() }, "Save")];
+  }
+
+  // ----- undo history for the bar being edited -----
+
+  _snap() {
+    return JSON.stringify({ d: this._draft, a: [...this._added] });
+  }
+
+  _restore(snap) {
+    const v = JSON.parse(snap);
+    this._draft = v.d;
+    this._added = new Set(v.a);
+    this._histSeen = snap;
+    this._scale = null;
+    if (this._nameInput) this._nameInput.value = v.d.name;
+    if (this._enabledInput) this._enabledInput.checked = !!v.d.enabled;
     this._renderForm();
     this._syncSimButtons();
+    this._pushStrip();
+    this._syncHist();
+  }
+
+  // Called a few times a second: a change becomes one undo step once it has settled
+  // (so a whole drag, or a burst of typing, is undone in one go).
+  _histTick(now) {
+    if (now - (this._histChk || 0) < 0.25) return;
+    this._histChk = now;
+    if (this._pointerDown || !this._hist.length) return;
+    const cur = this._snap();
+    if (cur !== this._histSeen) {
+      this._histSeen = cur;
+      this._histAt = now;
+      this._syncHist(cur);
+    } else if (cur !== this._hist[this._hist.length - 1] && now - (this._histAt || 0) > 0.45) {
+      this._hist.push(cur);
+      if (this._hist.length > 80) this._hist.shift();
+      this._redo = [];
+      this._syncHist(cur);
+    }
+  }
+
+  _syncHist(cur = this._snap()) {
+    if (!this._undoBtn) return;
+    this._undoBtn.disabled = !(this._hist.length > 1 || cur !== this._hist[this._hist.length - 1]);
+    this._redoBtn.disabled = !this._redo.length;
+  }
+
+  _undo() {
+    if (!this._hist.length) return;
+    const cur = this._snap(), top = this._hist[this._hist.length - 1];
+    if (cur !== top) { this._redo.push(cur); this._restore(top); }
+    else if (this._hist.length > 1) { this._redo.push(this._hist.pop()); this._restore(this._hist[this._hist.length - 1]); }
+  }
+
+  _redoStep() {
+    if (!this._redo.length) return;
+    const snap = this._redo.pop();
+    this._hist.push(snap);
+    this._restore(snap);
   }
 
   _syncSimButtons() {
@@ -1333,7 +1784,12 @@ class WledBarsPanel extends HTMLElement {
       ontoggle: (e) => { if (e.target.open) this._closed.delete(id); else this._closed.add(id); } },
       h("summary", {}, h("span", { class: "sic" }, ic(def.icon, 18)), h("span", {}, def.title), h("small", {}, def.hint),
         h("button", { class: "btn xs danger rm", title: "Remove this from the bar",
-          onclick: (e) => { e.preventDefault(); e.stopPropagation(); def.remove(this._draft); this._added.delete(id); this._touch(true); } }, ic("x", 12), "Remove")),
+          onclick: (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            el.classList.add("leave");
+            setTimeout(() => { def.remove(this._draft); this._added.delete(id); this._touch(true); }, 170);
+          } }, ic("x", 12), "Remove")),
       h("div", { class: "sec" }, kids));
     if (this._flash === id) {
       el.classList.add("flash");
@@ -1627,6 +2083,88 @@ class WledBarsPanel extends HTMLElement {
     return (!bar.source.attribute && st?.attributes?.unit_of_measurement) || "";
   }
 
+  // The gradient itself is the control: click it to add a colour, drag a dot to move it,
+  // drag a dot off the bar to remove it. The row underneath edits the selected dot exactly.
+  _gradEditor(d, numeric, deg) {
+    const c = d.color;
+    if (!(this._stopSel >= 0 && this._stopSel < c.stops.length)) this._stopSel = 0;
+    const el = h("div", { class: "ge" });
+    const bar = h("div", { class: "gb", title: "Click to add a colour" });
+    const detail = h("div", { class: "rowx full" });
+    const handles = [];
+    let syncDetail = () => {};
+    let colourBox = null;
+    const paint = () => {
+      const st = E.normalizeBar(d).color.stops;
+      if (st.length === 1) bar.style.background = st[0].color;
+      else if (c.mode === "steps" || (c.mode === "value" && !c.blend))
+        bar.style.background = `linear-gradient(90deg,${st.map((x, i) => `${x.color} ${x.pos}%,${x.color} ${i + 1 < st.length ? st[i + 1].pos : 100}%`).join(",")})`;
+      else bar.style.background = `linear-gradient(90deg,${st.map((x) => `${x.color} ${x.pos}%`).join(",")})`;
+      c.stops.forEach((stop, i) => {
+        if (!handles[i]) return;
+        handles[i].style.left = `${E.clamp(E.num(stop.pos, 0) / 100) * 100}%`;
+        handles[i].firstChild.style.background = stop.color;
+        handles[i].classList.toggle("sel", i === this._stopSel);
+      });
+      syncDetail();
+    };
+    this._hooks.push(paint);
+    const showDetail = () => {
+      const stop = c.stops[this._stopSel];
+      const val = h("span", { class: "dim sm" });
+      const posBox = h("input", { type: "number", min: 0, max: 100, step: 1, value: Math.round(stop.pos), style: "width:64px", title: "Position along the bar",
+        oninput: (e) => { if (e.target.value !== "") { stop.pos = E.clamp(Number(e.target.value) / 100) * 100; this._touch(false); } } });
+      colourBox = h("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(stop.color) ? stop.color : "#ffffff", title: "Colour of the selected dot",
+        oninput: (e) => { stop.color = e.target.value; this._touch(false); } });
+      syncDetail = () => {
+        if (this.shadowRoot.activeElement !== posBox) posBox.value = Math.round(stop.pos);
+        val.textContent = numeric ? `= ${Math.round(E.fracToValue(E.normalizeBar(d), stop.pos / 100) * 10) / 10}${deg}` : "";
+      };
+      detail.replaceChildren(...[
+        colourBox, h("span", { class: "dim sm" }, "at"), posBox, h("span", { class: "dim sm" }, "%"), val, h("span", { class: "grow" }),
+        c.stops.length > 1 && h("button", { class: "btn xs danger", title: "Remove this colour",
+          onclick: (e) => { e.preventDefault(); c.stops.splice(this._stopSel, 1); this._stopSel = 0; this._touch(true); } }, ic("x", 12), "Remove"),
+      ].filter(Boolean));
+      syncDetail();
+    };
+    c.stops.forEach((stop, i) => {
+      const hd = h("div", { class: "gs", style: "touch-action:none", title: "Drag to move · click to change the colour · drag off the bar to remove" }, h("i"));
+      handles[i] = hd;
+      dragHandle(hd, (e) => ({ x: e.clientX, y: e.clientY, moved: false, out: false }),
+        (e, ctx) => {
+          if (!ctx.moved && Math.hypot(e.clientX - ctx.x, e.clientY - ctx.y) < 4) return;
+          if (!ctx.moved) { ctx.moved = true; this._stopSel = i; showDetail(); }
+          const r = el.getBoundingClientRect();
+          stop.pos = Math.round(E.clamp((e.clientX - r.left) / r.width) * 100);
+          ctx.out = c.stops.length > 1 && Math.abs(e.clientY - (r.top + 14)) > 56;
+          hd.classList.toggle("out", ctx.out);
+          for (const fn of this._hooks) fn();
+        },
+        (ctx) => {
+          if (ctx.out) { c.stops.splice(c.stops.indexOf(stop), 1); this._stopSel = 0; this._touch(true); return; }
+          if (!ctx.moved) {
+            // a plain click selects the dot and opens its colour
+            this._stopSel = i;
+            showDetail();
+            paint();
+            try { if (colourBox.showPicker) colourBox.showPicker(); else colourBox.click(); } catch (_e) { /* the swatch below is still there to click */ }
+          }
+          this._pushStrip();
+        });
+      el.append(hd);
+    });
+    bar.addEventListener("click", (e) => {
+      const r = el.getBoundingClientRect();
+      const pos = Math.round(E.clamp((e.clientX - r.left) / r.width) * 100);
+      c.stops.push({ pos, color: mixAt(E.normalizeBar(d).color.stops, pos) });
+      this._stopSel = c.stops.length - 1;
+      this._touch(true);
+    });
+    el.prepend(bar);
+    showDetail();
+    return [el, detail, h("div", { class: "dim sm full" }, "Click the bar to add a colour. Drag a dot to move it, or drag it off the bar to remove it.")];
+  }
+
   _renderForm() {
     const d = this._draft;
     const form = this._form;
@@ -1647,8 +2185,22 @@ class WledBarsPanel extends HTMLElement {
 
     // --- 1. where ---
     const pick = h("canvas");
+    const ZOOMS = [0, 13, 20, 28]; // px per LED; 0 = fit the whole strip in view
+    const zoom = ZOOMS[this._zoomIdx] || 0;
+    if (zoom) pick.style.width = count * zoom + "px";
+    const scroller = h("div", { class: "scroller", onscroll: (e) => { this._pickScroll = e.target.scrollLeft; } }, pick);
+    const setZoom = (idx) => (e) => {
+      e.preventDefault();
+      this._zoomIdx = Math.max(0, Math.min(ZOOMS.length - 1, idx));
+      this._zoomCenter = true;
+      this._touch(true);
+    };
+    const zoomCtl = count > 30 && h("span", { class: "seg", title: "Zoom in to place a bar precisely on a long strip" },
+      h("button", { class: zoom ? "" : "on", onclick: setZoom(0) }, "Whole strip"),
+      h("button", { title: "Zoom out", disabled: !zoom, onclick: setZoom(this._zoomIdx - 1) }, ic("zoomout", 15)),
+      h("button", { title: "Zoom in", disabled: this._zoomIdx >= ZOOMS.length - 1, onclick: setZoom(this._zoomIdx + 1) }, ic("zoomin", 15)));
     this._picker = new StripView(pick, {
-      labels: true, max: 22,
+      labels: true, ruler: true, max: 22, zoom,
       // dragging never changes which way the bar runs; only "Flip direction" does
       onSelect: (lo, hi, done) => {
         const reversed = d.start > d.end;
@@ -1665,14 +2217,21 @@ class WledBarsPanel extends HTMLElement {
         + (over.length ? ` · shares LEDs with ${over.join(", ")}` : "");
     });
     form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either white end to resize", [
-      h("div", { class: "stage full" }, pick), posInfo,
+      h("div", { class: "stage full" }, scroller), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
       F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 })),
       h("div", { class: "rowx full" },
         h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, ic("flip", 15), "Flip direction"),
         h("button", { class: "btn", title: "Blink this range on the real strip so you can find it",
-          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, ic("find", 15), "Find on strip")),
+          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, ic("find", 15), "Find on strip"),
+        h("span", { class: "grow" }), zoomCtl),
     ]));
+    if (zoom) {
+      // keep the place when the form is redrawn; after a zoom change, bring the bar into view
+      const lo = Math.min(d.start, d.end), hi = Math.max(d.start, d.end);
+      scroller.scrollLeft = this._zoomCenter ? ((lo + hi + 1) / 2) * zoom - scroller.clientWidth / 2 : this._pickScroll || 0;
+    }
+    this._zoomCenter = false;
 
     // --- 2. what it shows ---
     const s = d.source;
@@ -1786,41 +2345,19 @@ class WledBarsPanel extends HTMLElement {
 
     // --- 3. colour ---
     const c = d.color;
-    const grad = h("div", { class: "grad full" });
-    const stopsBox = h("div", { class: "full", style: "display:flex;flex-direction:column;gap:6px" });
+    if (!c.stops.length) c.stops.push({ pos: 0, color: "#ffffff" });
     const multi = c.mode !== "solid" && c.mode !== "rainbow";
-    const paintGrad = () => {
-      const st = E.normalizeBar(d).color.stops;
-      if (c.mode === "rainbow") grad.style.background = "linear-gradient(90deg,red,yellow,lime,cyan,blue,magenta,red)";
-      else if (c.mode === "solid" || st.length === 1) grad.style.background = st[0].color;
-      else if (c.mode === "steps" || (c.mode === "value" && !c.blend))
-        grad.style.background = `linear-gradient(90deg,${st.map((x, i) => `${x.color} ${x.pos}%,${x.color} ${i + 1 < st.length ? st[i + 1].pos : 100}%`).join(",")})`;
-      else grad.style.background = `linear-gradient(90deg,${st.map((x) => `${x.color} ${x.pos}%`).join(",")})`;
-    };
-    this._hooks.push(paintGrad);
-    if (c.mode !== "rainbow") {
-      (multi ? c.stops : c.stops.slice(0, 1)).forEach((stop, i) => {
-        const val = h("span", { class: "dim sm", style: "width:70px;text-align:right" });
-        const setVal = () => { val.textContent = numeric ? `${Math.round(E.fracToValue(E.normalizeBar(d), stop.pos / 100) * 10) / 10}${deg}` : ""; };
-        this._hooks.push(setVal);
-        stopsBox.append(h("div", { class: "rowx" },
-          I(stop, "color", "color"),
-          multi && h("span", { class: "grow" }, I(stop, "pos", "range", { min: 0, max: 100, unit: " %" })),
-          multi && val,
-          multi && c.stops.length > 1 && h("button", { class: "btn xs danger", onclick: (e) => { e.preventDefault(); c.stops.splice(i, 1); this._touch(true); } }, ic("x", 12))));
-      });
-    }
     form.append(this._card("3", "Colour", null, [
       F("Colour style", I(c, "mode", "sel", { options: [
         ["solid", "One colour"], ["gradient", "Gradient along the bar"], ["steps", "Colour zones along the bar"],
         ["value", "Whole bar changes colour with the value"], ["rainbow", "Rainbow"]] }), null, "full"),
-      grad,
-      c.mode !== "rainbow" && stopsBox,
+      c.mode === "solid" && F("Colour", I(c.stops[0], "color", "color")),
+      c.mode === "rainbow" && h("div", { class: "full", style: "height:28px;border-radius:8px;border:1px solid var(--wb-line);background:linear-gradient(90deg,red,yellow,lime,cyan,blue,magenta,red)" }),
+      multi && this._gradEditor(d, numeric, deg),
       multi && h("div", { class: "rowx full" },
-        h("button", { class: "btn xs", onclick: (e) => { e.preventDefault(); c.stops.push({ pos: 50, color: "#ffffff" }); this._touch(true); } }, "+ Add colour stop"),
         h("span", { class: "dim sm" }, "Presets:"),
         h("div", { class: "chips" }, PALETTES.map(([name, cols]) =>
-          h("button", { class: "chip", onclick: (e) => { e.preventDefault(); c.stops = evenStops(cols); this._touch(true); } },
+          h("button", { class: "chip", onclick: (e) => { e.preventDefault(); c.stops = evenStops(cols); this._stopSel = 0; this._touch(true); } },
             h("i", { style: `background:linear-gradient(90deg,${cols.concat(cols.length === 1 ? cols : []).join(",")})` }), name)))),
       c.mode === "gradient" && F("Gradient spans", I(c, "span", "sel", { options: [["bar", "The whole bar"], ["fill", "The lit part only"]] })),
       c.mode === "value" && F("Blend between colours", I(c, "blend", "tog"), "Off = hard switch at each stop"),
@@ -2129,6 +2666,7 @@ class WledBarsPanel extends HTMLElement {
       const px = E.renderBar(bar, this._simCtx(bar, now));
       this._preview.pixels = px;
       this._preview.draw();
+      this._histTick(now);
       if (this._rangeInfo) this._rangeInfo();
       if (this._condDots && this._condDots.length && now - (this._condAt || 0) > 1) {
         this._condAt = now;
@@ -2158,15 +2696,20 @@ class WledBarsPanel extends HTMLElement {
       for (const strip of this._strips) {
         if (!strip.barRef) continue;
         const bar = strip.barRef;
-        strip.pixels = E.barLeds(bar).map((idx) => live[idx] || [0, 0, 0]);
-        strip.draw();
         const st = this._live.bars[bar.id];
-        if (st) {
-          strip.pctEl.textContent = st.state === "active" ? `${fmt(st.percent)} %` : "–";
-          strip.pillEl.textContent = !bar.enabled ? "disabled" : st.state === "unavailable" ? "unavailable" : st.visible ? "showing" : "hidden";
-          strip.pillEl.className = "pill" + (st.visible ? " live" : st.state === "unavailable" ? " bad" : "");
-        }
+        const visible = !!st?.visible;
+        // a hidden bar is drawn faintly, as it would look, so the card is never just black
+        strip.pixels = visible ? E.barLeds(bar).map((idx) => live[idx] || [0, 0, 0])
+          : E.renderBar(bar, { t: now, frac: st && st.state === "active" ? st.percent / 100 : 0.6, brightness: 1 });
+        strip.c.style.opacity = visible ? "" : ".3";
+        strip.draw();
+        strip.pctEl.textContent = st && st.state === "active" ? `${fmt(st.percent)} %` : "–";
+        const info = this._statusOf(bar, strip.index);
+        if (strip.stEl.textContent !== info.text) strip.stEl.textContent = info.text;
+        strip.dotEl.className = "dot " + info.tone;
       }
+      const d = new Date();
+      for (const line of this._tlNow || []) line.style.left = `${((d.getHours() * 60 + d.getMinutes()) / 1440) * 100}%`;
     }
   }
 }

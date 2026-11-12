@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.3.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.4.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -38,7 +38,13 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Range:** for a sensor, set the reading that means an empty bar and the reading that means a full bar; the editor tells you what the current reading lights up, and the preview follows the live value until you drag *Simulate*.
 - **Tailored to the preset:** each template only shows what applies to it. A temperature gauge gets a draggable cold-to-hot scale with Room / Outdoor / Fridge / Freezer presets and no "finished" options; a countdown only offers timers.
 - **Show only when…:** build conditions visually: drag a block on a 24-hour bar, pick days of the week, or tie the bar to an entity's state or a number. Combine with *all* or *any*. Duplicate a bar and give each copy its own times to show different bars on the same LEDs through the day.
-- **Order:** drag bar cards to reorder them. Where bars share LEDs, the one further down the list is drawn on top.
+- **Through the day:** the bar list shows a 24-hour timeline with one row per bar. Drag a block to change when a bar shows, drag its ends to resize it, or drag across an empty row to give that bar hours. Stripes mark the times when a bar further down the list shares its LEDs and is drawn on top.
+- **Why isn't it showing?** each bar card says what the bar is doing right now: *Showing*, *Hidden until 18:00*, *Hidden: Printer is idle*, *Covered by Battery*, *Hidden: source unavailable*. A hidden bar is drawn faintly so you can still see what it looks like.
+- **Undo:** the editor has Undo and Redo in the top bar (Ctrl/Cmd+Z). Deleting a bar or changing its hours on the timeline shows an *Undo* button for a few seconds.
+- **Colours:** the gradient is the control. Click it to add a colour, drag a dot to move it, click a dot to change its colour, drag it off the bar to remove it.
+- **Long strips:** the strip picker has LED numbers and a zoom, so a bar can be placed to the exact LED on a strip of a few hundred.
+- **Phones:** bars reorder by dragging the grip with a finger, the preview shrinks to the essentials as you scroll, and Save stays in the top bar.
+- **Order:** drag a bar card by its grip to reorder. Where bars share LEDs, the one further down the list is drawn on top.
 - **Preset defaults:** the *Preset defaults* button (top of the bar list) chooses which add-ons each preset starts with. It applies to every strip and only affects new bars.
 - **Distance to a place:** fills as a person, a device tracker or a distance sensor gets closer to a zone (home by default). The length of the bar is a set distance, the distance between two zones you pick (for example work to home), or wherever the trip starts.
 - **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.

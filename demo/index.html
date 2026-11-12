@@ -13,7 +13,9 @@
 import * as E from "../custom_components/wled_bars/frontend/engine.js";
 import { conditionsOk, distanceInfo } from "../custom_components/wled_bars/frontend/wled-bars.js";
 
-const LEDS = 60;
+// ?leds=165 tries a long strip, ?theme=light a light Home Assistant theme
+const query = new URLSearchParams(location.search);
+const LEDS = Number(query.get("leds")) || 60;
 const states = {
   "sensor.printer_progress": { state: "0", attributes: { friendly_name: "Printer progress", unit_of_measurement: "%" } },
   "sensor.living_room_temperature": { state: "71.4", attributes: { friendly_name: "Living room temperature", unit_of_measurement: "°F", device_class: "temperature" } },
@@ -79,7 +81,8 @@ setInterval(() => {
     if (target >= 1) fullSince[bar.id] = fullSince[bar.id] ?? t; else delete fullSince[bar.id];
     const allowed = settings.enabled && bar.enabled && conditionsOk(bar.visibility, getState);
     const visible = allowed && !(preview && preview.bar.id === bar.id);
-    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: allowed });
+    const why = allowed ? undefined : settings.enabled && bar.enabled ? "conditions" : "disabled";
+    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: allowed, why });
     if (visible) draw(bar, shown[bar.id], { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
   }
   if (preview) draw(preview.bar, preview.frac);
@@ -109,6 +112,13 @@ const hass = {
   },
 };
 const panel = document.createElement("wled-bars-panel");
+if (query.get("theme") === "light") {
+  document.body.style.background = "#fafafa";
+  const vars = { "--primary-background-color": "#fafafa", "--card-background-color": "#ffffff", "--primary-text-color": "#212121",
+    "--secondary-text-color": "#727272", "--divider-color": "rgba(0,0,0,.12)", "--primary-color": "#03a9f4", "--text-primary-color": "#ffffff",
+    "--app-header-background-color": "#03a9f4", "--app-header-text-color": "#ffffff", "--ha-card-box-shadow": "0 1px 3px rgba(0,0,0,.08)" };
+  for (const [k, v] of Object.entries(vars)) panel.style.setProperty(k, v);
+}
 document.body.append(panel);
 panel.hass = hass;
 window.__panel = panel;
