@@ -597,6 +597,25 @@ const presetAddons = (tpl, saved) => {
 
 // ---------- LED strip canvas ----------
 
+// Light or dark? Home Assistant says so; failing that, judge by the card background.
+// The host gets a "light" attribute, which the styles and the strip drawings follow.
+function applyTone(host, hass) {
+  let dark = hass?.themes?.darkMode;
+  if (dark === undefined) {
+    const bg = getComputedStyle(host).getPropertyValue("--card-background-color").trim();
+    const m = /^#([0-9a-f]{6})/i.exec(bg) || null;
+    const rgb = m ? [0, 2, 4].map((i) => parseInt(m[1].substr(i, 2), 16)) : (/rgba?\(([^)]+)\)/.exec(bg)?.[1].split(",").map(Number) || null);
+    dark = !rgb || 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 140;
+  }
+  if (host.hasAttribute("light") === dark) {
+    host.toggleAttribute("light", !dark);
+    return true;
+  }
+  return false;
+}
+const STRIP_DARK = { off: "#1d212b", num: "#7c869d", tick: "#3a4152", label: "#aab3c5", mid: "rgba(255,255,255,.35)", first: "#3dff8b", last: "#ff5d5d", handle: "#ffffff", mark: "#c9d1e3" };
+const STRIP_LIGHT = { off: "rgba(0,0,0,.09)", num: "#6b7486", tick: "rgba(0,0,0,.25)", label: "#566079", mid: "rgba(0,0,0,.3)", first: "#12a150", last: "#e5484d", handle: "#30384a", mark: "#566079" };
+
 class StripView {
   constructor(canvas, opts = {}) {
     this.c = canvas;
@@ -716,7 +735,14 @@ class StripView {
     return Math.min(L.n - 1, row * L.perRow + col);
   }
 
+  get light() {
+    const root = this.c.getRootNode();
+    return !!(root && root.host && root.host.hasAttribute("light"));
+  }
+
   draw() {
+    const light = this.light;
+    const P = light ? STRIP_LIGHT : STRIP_DARK;
     const wide = this.o.zoom ? Math.max(1, this.pixels.length) * this.o.zoom + "px" : "";
     if (this.c.style.width !== wide) this.c.style.width = wide;
     const L = this.layout();
@@ -740,9 +766,9 @@ class StripView {
       g.textBaseline = "top";
       for (let i = 0; i < L.n; i += step) {
         const [x, y] = pos(i);
-        g.fillStyle = "#7c869d";
+        g.fillStyle = P.num;
         g.fillText(String(i), Math.max(x, 7), y - L.size / 2 - L.top + 1);
-        g.fillStyle = "#3a4152";
+        g.fillStyle = P.tick;
         g.fillRect(x - 0.5, y - L.size / 2 - 3, 1, 3);
       }
       g.textAlign = "left";
@@ -757,7 +783,21 @@ class StripView {
       g.arc(x, y, rad, 0, Math.PI * 2);
       if (level <= 0) {
         g.shadowBlur = 0;
-        g.fillStyle = "#1d212b";
+        g.fillStyle = P.off;
+      } else if (light) {
+        // on a light surface an LED can't glow: show its full colour, fading towards the surface as it dims
+        const a = Math.max(0.22, Math.pow(level / 255, 0.5));
+        const col = p.map((v) => Math.round(((v / level) * 235 * a) + 238 * (1 - a)));
+        g.shadowColor = `rgba(${p.map((v) => Math.round((v / level) * 200)).join(",")},${0.55 * a})`;
+        g.shadowBlur = L.size * 0.3;
+        g.fillStyle = `rgb(${col.join(",")})`;
+        g.fill();
+        // a hairline keeps white and yellow LEDs visible
+        g.shadowBlur = 0;
+        g.lineWidth = 1;
+        g.strokeStyle = `rgba(0,0,0,${0.1 + 0.12 * a})`;
+        g.stroke();
+        continue;
       } else {
         const col = `rgb(${disp(p[0])},${disp(p[1])},${disp(p[2])})`;
         g.shadowColor = col;
@@ -779,7 +819,7 @@ class StripView {
         const [x, y] = pos(lo);
         g.font = "10px system-ui, sans-serif";
         g.textBaseline = "top";
-        g.fillStyle = "#aab3c5";
+        g.fillStyle = P.label;
         // keep the name inside the canvas when its bar starts near the right edge
         g.fillText(rg.label, Math.max(2, Math.min(x - L.size / 2 + 2, L.w - g.measureText(rg.label).width - 2)), y + L.size / 2 + 5);
       }
@@ -790,14 +830,14 @@ class StripView {
       g.lineWidth = 1.5;
       for (let i = lo; i <= hi && i < L.n; i++) {
         const [x, y] = pos(i);
-        g.strokeStyle = i === this.sel.start ? "#3dff8b" : i === this.sel.end ? "#ff5d5d" : "rgba(255,255,255,.35)";
+        g.strokeStyle = i === this.sel.start ? P.first : i === this.sel.end ? P.last : P.mid;
         g.beginPath();
         g.arc(x, y, rad + 2.5, 0, Math.PI * 2);
         g.stroke();
       }
       if (this.o.onSelect) {
         // grab handles on the two outer edges
-        g.fillStyle = "#ffffff";
+        g.fillStyle = P.handle;
         for (const [i, side] of [[lo, -1], [hi, 1]]) {
           if (i >= L.n) continue;
           const [x, y] = pos(i);
@@ -838,6 +878,9 @@ const CSS = `
 .card h2{margin:0 0 4px;font-size:15px;font-weight:600}
 .dim{color:var(--wb-dim)} .sm{font-size:12px}
 .stage{background:var(--wb-stage);border-radius:var(--wb-r-sm);padding:14px 12px 8px;position:relative}
+:host([light]){--wb-stage:color-mix(in srgb,var(--wb-text) 5%,var(--wb-card))}
+:host([light]) .stage{box-shadow:inset 0 0 0 1px var(--wb-line)}
+:host([light]) .scroller{scrollbar-color:rgba(0,0,0,.25) transparent}
 .stage canvas{display:block;width:100%}
 .scroller{overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#3a4152 transparent;padding-bottom:4px}
 button,select,input{font:inherit;color:inherit}
@@ -1070,6 +1113,11 @@ class WledBarsPanel extends HTMLElement {
     this._hass = hass;
     const menu = this.shadowRoot.querySelector("ha-menu-button");
     if (menu) menu.hass = hass;
+    if (hass.themes !== this._themes || !this._toned) {
+      this._themes = hass.themes;
+      this._toned = true;
+      if (applyTone(this, hass)) this._liveDirty = true;
+    }
     if (!this._loaded) {
       this._loaded = true;
       this._load();
@@ -2881,7 +2929,7 @@ class WledBarsPanel extends HTMLElement {
         this._picker.sel = { start: bar.start, end: bar.end };
         this._picker.ranges = this._bars
           .filter((_b, i) => i !== this._draftIndex)
-          .map((b) => ({ start: b.start, end: b.end, label: b.name, color: "#566079" }));
+          .map((b) => ({ start: b.start, end: b.end, label: b.name, color: this._picker.light ? "#9aa3b5" : "#566079" }));
         this._picker.draw();
       }
       return;
@@ -2931,6 +2979,9 @@ const CARD_CSS = `
 .sum.off{color:var(--wb-dim)} .sum.bad{color:var(--wb-err)}
 .grow{flex:1}
 .stage{background:#0a0c11;border-radius:10px;padding:12px 10px 6px;position:relative}
+:host([light]) .stage{background:color-mix(in srgb,var(--wb-text) 5%,transparent);box-shadow:inset 0 0 0 1px var(--wb-line)}
+:host([light]) .cap{color:var(--wb-dim)}
+:host([light]) .stage.standby canvas{opacity:.75}
 .stage canvas{display:block;width:100%;transition:opacity .2s ease}
 .stage.standby canvas{opacity:.5}
 .cap{font-size:11px;color:#8c95a8;text-align:center;padding:2px 0 4px;letter-spacing:.02em}
@@ -3009,10 +3060,19 @@ class WledBarsCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    if (this.isConnected && (hass.themes !== this._themes || !this._toned)) {
+      this._themes = hass.themes;
+      this._toned = true;
+      if (applyTone(this, hass) && this._started) this._render(true);
+    }
     if (!this._started && this.isConnected) this._start();
   }
 
   connectedCallback() {
+    if (this._hass) {
+      this._toned = true;
+      applyTone(this, this._hass);
+    }
     if (this._hass && !this._started) this._start();
   }
 
@@ -3202,7 +3262,7 @@ class WledBarsCard extends HTMLElement {
         });
       }
       this._strip.pixels = px;
-      this._strip.ranges = selBar ? [{ start: selBar.start, end: selBar.end, color: "#c9d1e3" }] : [];
+      this._strip.ranges = selBar ? [{ start: selBar.start, end: selBar.end, color: this._strip.light ? STRIP_LIGHT.mark : STRIP_DARK.mark }] : [];
       this._strip.draw();
     }
     if (!texts) return;
