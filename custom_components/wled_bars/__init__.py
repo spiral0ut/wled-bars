@@ -27,7 +27,7 @@ from .const import (
     STATIC_URL,
 )
 from . import engine
-from .manager import FLASH_EFFECTS, BarsManager
+from .manager import FLASH_EFFECTS, BarLookupError, BarsManager, resolve_bar
 from .websocket import async_register_websocket
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,12 +41,12 @@ def managers(hass: HomeAssistant) -> dict[str, BarsManager]:
     return hass.data.setdefault(DOMAIN, {})
 
 
-def _find(hass: HomeAssistant, key: str):
-    for mgr in managers(hass).values():
-        rt = mgr.find_bar(key)
-        if rt is not None:
-            return mgr, rt
-    raise ServiceValidationError(f"No WLED bar named or with id '{key}'")
+def _find(hass: HomeAssistant, data):
+    """The bar a service call means; `device` narrows it when names repeat."""
+    try:
+        return resolve_bar(list(managers(hass).values()), data["bar"], data.get("device"))
+    except BarLookupError as err:
+        raise ServiceValidationError(str(err)) from err
 
 
 async def _async_setup_shared(hass: HomeAssistant) -> None:
@@ -83,19 +83,19 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
     async_register_websocket(hass)
 
     async def start_timer(call: ServiceCall) -> None:
-        mgr, rt = _find(hass, call.data["bar"])
+        mgr, rt = _find(hass, call.data)
         mgr.start_timer(rt, call.data["duration"].total_seconds())
 
     async def stop_timer(call: ServiceCall) -> None:
-        mgr, rt = _find(hass, call.data["bar"])
+        mgr, rt = _find(hass, call.data)
         mgr.stop_timer(rt)
 
     async def set_value(call: ServiceCall) -> None:
-        mgr, rt = _find(hass, call.data["bar"])
+        mgr, rt = _find(hass, call.data)
         mgr.set_value(rt, call.data["value"])
 
     async def set_enabled(call: ServiceCall) -> None:
-        mgr, rt = _find(hass, call.data["bar"])
+        mgr, rt = _find(hass, call.data)
         bars = [dict(b) for b in mgr.bars]
         for bar in bars:
             if bar["id"] == rt.bar["id"]:
@@ -111,14 +111,11 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
         effect = data.get("effect", "flash")
         if data.get("bar"):
             # just this bar's LEDs
-            mgr, rt = _find(hass, data["bar"])
+            mgr, rt = _find(hass, data)
             targets = [(mgr, engine.bar_leds(rt.bar))]
         else:
             wanted = str(data.get("device") or "").strip().lower()
-            mgrs = [
-                m for m in managers(hass).values()
-                if not wanted or wanted in (m.entry.entry_id.lower(), m.entry.title.strip().lower())
-            ]
+            mgrs = [m for m in managers(hass).values() if not wanted or wanted in m.keys()]
             if not mgrs:
                 raise ServiceValidationError(f"No WLED Bars device named '{data.get('device')}'")
             leds = None
@@ -146,7 +143,7 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
         ),
     )
 
-    bar = {vol.Required("bar"): cv.string}
+    bar = {vol.Required("bar"): cv.string, vol.Optional("device"): cv.string}
     hass.services.async_register(
         DOMAIN,
         SERVICE_START_TIMER,

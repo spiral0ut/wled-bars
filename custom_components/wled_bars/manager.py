@@ -26,6 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 BLACK = (0, 0, 0)
 UNAVAILABLE = ("unavailable", "unknown", "none", "")
 HEALTH_INTERVAL = 30.0
+# With per-LED JSON, anything that changes the preset or effect in WLED wipes
+# our LEDs without telling us, so what is showing is sent again this often.
+REPAINT_INTERVAL = 5.0
 PREVIEW_TTL = 20.0
 
 
@@ -105,6 +108,35 @@ def distance_fraction(remaining: float, total: float) -> float:
     return engine.clamp(1.0 - remaining / total)
 
 
+class BarLookupError(LookupError):
+    """A service named a bar that does not exist, or a name several bars share."""
+
+
+def resolve_bar(managers: list, key: str, device: str | None = None):
+    """Find the bar a service call means: (manager, runtime).
+
+    `key` is a bar's id or its name; `device` (a strip's name or id) narrows
+    the search. A name that several bars share is refused rather than guessed.
+    """
+    wanted = str(device or "").strip().lower()
+    if wanted:
+        managers = [m for m in managers if wanted in m.keys()]
+        if not managers:
+            raise BarLookupError(f"No WLED Bars device named '{device}'")
+    found = [(m, rt) for m in managers for rt in m.find_bars(key)]
+    if not found:
+        where = f" on '{device}'" if wanted else ""
+        raise BarLookupError(f"No WLED bar named or with id '{key}'{where}")
+    if len(found) > 1:
+        strips = sorted({m.name for m, _ in found})
+        if len(strips) > 1:
+            hint = f"it is on {', '.join(strips)}: add 'device' to say which strip"
+        else:
+            hint = f"{len(found)} bars on {strips[0]} have that name: rename one, or use the bar's id"
+        raise BarLookupError(f"More than one WLED bar is named '{key}'; {hint}")
+    return found[0]
+
+
 class BarRuntime:
     """Live state of one bar that is not part of its saved configuration."""
 
@@ -123,6 +155,7 @@ class BarRuntime:
         self.dist_arrived = False
         self.easing = False
         self.total: float | None = None  # length in seconds of a running time-based source
+        self.starts_in: float | None = None  # seconds until a time-based source has something to show
         self.status: dict = {}
 
 
@@ -154,12 +187,14 @@ class BarsManager:
         self._flash: tuple[list[int], dict, float, float] | None = None  # (leds, look, started, seconds)
         self._last_frame: dict[int, tuple[int, int, int]] = {}
         self._status_sig: tuple = ()
+        self._last_repaint = 0.0
 
     # ---------- lifecycle ----------
 
     async def async_start(self) -> None:
         data = await self._store.async_load() or {}
         self._apply(data.get("bars", []), data.get("settings", {}))
+        self._restore_manual(data.get("manual"))
         await self._health(force=True)
         self._task = self.entry.async_create_background_task(
             self.hass, self._run(), f"{DOMAIN}_{self.entry.entry_id}"
@@ -223,8 +258,42 @@ class BarsManager:
             self.settings["segment"] = old_transport[1]
             await self._give_back()
             self.settings["segment"] = seg
-        await self._store.async_save({"bars": self.bars, "settings": self.settings})
+        await self._store.async_save(self._stored())
         async_dispatcher_send(self.hass, f"{SIGNAL_SETTINGS}_{self.entry.entry_id}")
+
+    def _stored(self) -> dict:
+        """Everything kept across restarts: bars, settings, and what automations set."""
+        manual = {}
+        for rt in self.runtimes:
+            if rt.timer is not None:
+                manual[rt.bar["id"]] = {"timer": [rt.timer[0].isoformat(), rt.timer[1]]}
+            elif rt.manual_value is not None:
+                manual[rt.bar["id"]] = {"value": rt.manual_value}
+        return {"bars": self.bars, "settings": self.settings, "manual": manual}
+
+    def _restore_manual(self, manual: Any) -> None:
+        """Pick up running timers and set values of manual bars after a restart."""
+        if not isinstance(manual, dict):
+            return
+        for rt in self.runtimes:
+            saved = manual.get(rt.bar["id"])
+            if not isinstance(saved, dict):
+                continue
+            try:
+                if "timer" in saved:
+                    started = datetime.fromisoformat(str(saved["timer"][0]))
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+                    rt.timer = (dt_util.as_utc(started), max(1.0, float(saved["timer"][1])))
+                elif "value" in saved:
+                    rt.manual_value = float(saved["value"])
+            except (ValueError, TypeError, IndexError, KeyError):
+                continue
+
+    def _manual_changed(self) -> None:
+        """A timer or value was set: write it to disk shortly, and redraw now."""
+        self._store.async_delay_save(self._stored, 1.0)
+        self._wake.set()
 
     async def async_remove_store(self) -> None:
         await self._store.async_remove()
@@ -265,23 +334,37 @@ class BarsManager:
                 return rt
         return None
 
+    def find_bars(self, key: str) -> list[BarRuntime]:
+        """The bar with this id, otherwise every bar with this name."""
+        wanted = str(key).strip().lower()
+        by_id = [rt for rt in self.runtimes if rt.bar["id"].lower() == wanted]
+        return by_id or [rt for rt in self.runtimes if rt.bar["name"].strip().lower() == wanted]
+
+    def keys(self) -> tuple[str, ...]:
+        """What a service's `device` may call this strip (lower case)."""
+        return (
+            self.entry.entry_id.lower(),
+            str(self.entry.title).strip().lower(),
+            str(self.name).strip().lower(),
+        )
+
     # ---------- things the UI and services can do ----------
 
     def start_timer(self, rt: BarRuntime, seconds: float) -> None:
         rt.timer = (dt_util.utcnow(), max(1.0, seconds))
         rt.manual_value = None
         rt.was_full = False
-        self._wake.set()
+        self._manual_changed()
 
     def stop_timer(self, rt: BarRuntime) -> None:
         rt.timer = None
         rt.manual_value = None
-        self._wake.set()
+        self._manual_changed()
 
     def set_value(self, rt: BarRuntime, value: float) -> None:
         rt.timer = None
         rt.manual_value = value
-        self._wake.set()
+        self._manual_changed()
 
     def set_preview(self, bar: dict | None, frac: float) -> None:
         if bar is None:
@@ -292,6 +375,7 @@ class BarsManager:
 
     def identify(self, leds: list[int]) -> None:
         self._identify = (leds, time.monotonic() + 3.0)
+        self._wake.set()  # the loop may be asleep for a while when nothing is showing
 
     def flash(self, leds: list[int] | None, color: str, effect: str, seconds: float) -> None:
         """Briefly take over some LEDs (all of them by default) for a notification."""
@@ -302,7 +386,6 @@ class BarsManager:
             return
         look = {"effect": effect if effect in FLASH_EFFECTS else "flash", "color": color}
         self._flash = (leds, look, time.monotonic(), max(0.5, min(120.0, seconds)))
-        self._wake.set()
         self._wake.set()
 
     @callback
@@ -493,6 +576,7 @@ class BarsManager:
         src = bar["source"]
         kind = src["type"]
         rt.total = None
+        rt.starts_in = None
 
         if kind == "entity":
             if not src["entity"]:
@@ -541,6 +625,7 @@ class BarsManager:
                 return ("idle", 0.0, None)
             elapsed = (utc - start).total_seconds()
             if elapsed < 0:
+                rt.starts_in = -elapsed
                 return ("idle", 0.0, None)
             hold = self._celebration_seconds(bar)
             if elapsed > total + hold:
@@ -794,13 +879,54 @@ class BarsManager:
             end_m = parse_hhmm(night["end"])
             if start_m is not None and end_m is not None:
                 local = dt_util.as_local(utc)
-                dim = in_window(local.hour * 60 + local.minute, start_m, end_m) is not None
+                now_min = local.hour * 60 + local.minute + local.second / 60.0
+                dim = in_window(now_min, start_m, end_m) is not None
         elif night["mode"] == "entity" and night["entity"]:
             current = self._state(night["entity"])
             dim = current is not None and current.lower() in ("on", "home", "below_horizon", "true")
         if dim:
             level *= engine.clamp(engine.num(night["level"], 20.0) / 100.0)
         return level
+
+    def _next_change(self, utc: datetime) -> float | None:
+        """Seconds until the clock alone changes what should show, if it ever does.
+
+        Covers the hours in "show only when", daily windows, night dimming and
+        time-based sources waiting for their start, so they switch on time
+        instead of at the next routine check.
+        """
+        minutes: set[int] = set()
+
+        def add(*texts: Any) -> None:
+            for text in texts:
+                minute = parse_hhmm(text)
+                if minute is not None:
+                    minutes.add(minute)
+
+        waits = []
+        for rt in self.runtimes:
+            bar = rt.bar
+            if not bar["enabled"]:
+                continue
+            for cond in bar["visibility"]["conditions"]:
+                if isinstance(cond, dict) and cond.get("type") == "time":
+                    add(cond.get("start"), cond.get("end"))
+                    if cond.get("days"):
+                        minutes.add(0)  # the day of the week changes at midnight
+            if bar["source"]["type"] == "window":
+                add(bar["source"]["window_start"], bar["source"]["window_end"])
+            if rt.starts_in is not None:
+                waits.append(rt.starts_in)
+        night = self.settings["night"]
+        if night["mode"] == "schedule":
+            add(night["start"], night["end"])
+
+        local = dt_util.as_local(utc)
+        seconds = local.hour * 3600 + local.minute * 60 + local.second + local.microsecond / 1e6
+        for minute in minutes:
+            waits.append((minute * 60 - seconds) % 86400 or 86400)
+        # a touch late rather than early, so the check lands on the far side of the boundary
+        return min(waits) + 0.05 if waits else None
 
     # ---------- frame loop ----------
 
@@ -828,6 +954,11 @@ class BarsManager:
 
     async def _tick(self) -> float:
         """Render and push one frame; return seconds until the next one."""
+        interval = await self._frame()
+        change = self._next_change(dt_util.utcnow())
+        return interval if change is None else min(interval, change)
+
+    async def _frame(self) -> float:
         self._wake.clear()
         await self._health()
         now = time.monotonic()
@@ -903,6 +1034,12 @@ class BarsManager:
                 animated = True
 
         self._last_frame = frame
+        if (
+            self._sent
+            and self.settings["transport"] == "json"
+            and now - self._last_repaint >= REPAINT_INTERVAL
+        ):
+            self._sent = {k: (-1, -1, -1) for k in self._sent}
         # tell the per-bar entities when something they show has changed
         signature = tuple(
             (rt.bar["id"], rt.status.get("state"), round(rt.status.get("percent") or 0.0), rt.status.get("visible"))
@@ -972,4 +1109,6 @@ class BarsManager:
         if changes or power_on:
             await self.client.set_pixels(segment, changes, power_on)
             self._sent = target
+            if len(changes) == len(target):  # everything was sent, not just what moved
+                self._last_repaint = time.monotonic()
         self._active = True

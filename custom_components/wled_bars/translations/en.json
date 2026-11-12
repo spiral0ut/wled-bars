@@ -5,17 +5,30 @@
       "user": {
         "title": "Connect a WLED device",
         "description": "Enter the IP address or hostname of the WLED controller that should show bars.",
-        "data": { "host": "Host" }
+        "data": {
+          "host": "Host"
+        }
       },
       "confirm": {
         "title": "WLED Bars",
         "description": "Use the WLED device **{name}** for progress and status bars?"
+      },
+      "reconfigure": {
+        "title": "Change the address",
+        "description": "Enter the new IP address or hostname of **{name}**. Its bars and settings are kept.",
+        "data": {
+          "host": "Host"
+        }
       }
     },
-    "error": { "cannot_connect": "Could not reach a WLED device at that address." },
+    "error": {
+      "cannot_connect": "Could not reach a WLED device at that address.",
+      "wrong_device": "That address belongs to a different WLED device. To use it, add it as a new device instead."
+    },
     "abort": {
       "already_configured": "This WLED device is already set up.",
-      "cannot_connect": "Could not reach the WLED device."
+      "cannot_connect": "Could not reach the WLED device.",
+      "reconfigure_successful": "The address was changed."
     }
   }
 }

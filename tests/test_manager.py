@@ -42,6 +42,9 @@ class Store:
     async def async_save(self, data):
         Store.data[self.key] = data
 
+    def async_delay_save(self, data_func, delay=0):
+        Store.data[self.key] = data_func()
+
     async def async_remove(self):
         Store.data.pop(self.key, None)
 
@@ -114,6 +117,7 @@ sys.modules["wb"] = pkg
 manager_mod = importlib.import_module("wb.manager")
 engine = importlib.import_module("wb.engine")
 wled = importlib.import_module("wb.wled")
+manager_mod.REPAINT_INTERVAL = 999.0  # switched on only for its own test
 
 
 class State:
@@ -493,6 +497,113 @@ async def main():
     assert (0, 255, 0) in seen and (0, 0, 0) in seen and mgr._last_frame.get(5) is None, seen
     await asyncio.sleep(0.5)
     print("ok notification flash")
+
+    # ---- the periodic repaint brings bars back after WLED wiped them ----
+    manager_mod.REPAINT_INTERVAL = 0.4
+    await asyncio.sleep(0.6)
+    fake.leds = [None] * len(fake.leds)  # someone loaded a preset in WLED
+    await asyncio.sleep(1.6)
+    assert fake.leds[10:15] == [(255, 0, 0)] * 5, fake.leds[8:16]
+    manager_mod.REPAINT_INTERVAL = 999.0
+    print("ok repaint after WLED wiped the LEDs")
+
+    # ---- "find on strip" works while nothing is showing (the loop is asleep) ----
+    hass.set("sensor.progress", "unavailable")
+    await settle(mgr, fake)
+    assert not mgr._last_frame, mgr._last_frame
+    mgr.identify([2, 3])
+    await asyncio.sleep(0.3)
+    assert mgr._last_frame.get(2) in ((255, 255, 255), (0, 0, 0)) and 4 not in mgr._last_frame, mgr._last_frame
+    await asyncio.sleep(3.3)
+    assert not mgr._last_frame and fake.frozen is False, "LEDs are handed back after the blink"
+    hass.set("sensor.progress", 50)
+    print("ok find on strip while idle")
+
+    # ---- manual timers and values survive a restart ----
+    class Entry2(Entry):
+        entry_id = "e2"
+        title = "Other"
+
+    manual = dict(bar, id="t", name="Timer", source={"type": "manual", "min": 0, "max": 10})
+    await mgr.async_save([bar, manual], None)
+    mgr.start_timer(mgr.find_bar("timer"), 600)
+    saved = Store.data["wled_bars.e1"]
+    assert list(saved["manual"]) == ["t"] and saved["manual"]["t"]["timer"][1] == 600, saved["manual"]
+    again = manager_mod.BarsManager(hass, Entry2(f"127.0.0.1:{port}"))
+    again.name = "Other"
+    again._apply(saved["bars"], saved["settings"])
+    again._restore_manual(saved["manual"])
+    started, seconds = again.find_bar("timer").timer
+    assert seconds == 600 and abs((manager_mod.dt_util.utcnow() - started).total_seconds()) < 5
+    state, frac, _left = again._source(again.find_bar("timer"), manager_mod.dt_util.utcnow())
+    assert state == "active" and frac < 0.02, (state, frac)
+    mgr.set_value(mgr.find_bar("timer"), 7.5)
+    assert Store.data["wled_bars.e1"]["manual"] == {"t": {"value": 7.5}}
+    again._restore_manual({"t": {"value": 7.5}, "gone": {"value": 1}, "p": "junk"})
+    assert again.find_bar("timer").manual_value == 7.5
+    mgr.stop_timer(mgr.find_bar("timer"))
+    assert Store.data["wled_bars.e1"]["manual"] == {}
+    await mgr.async_save(None, None)
+    assert Store.data["wled_bars.e1"]["manual"] == {}, "an ordinary save keeps the manual section"
+    print("ok manual timer and value survive a restart")
+
+    # ---- a name shared by bars is refused instead of guessed ----
+    both = [mgr, again]
+    assert manager_mod.resolve_bar(both, "Progress", "Other") == (again, again.find_bar("progress"))
+    assert manager_mod.resolve_bar(both, "progress", "e1")[0] is mgr
+    assert manager_mod.resolve_bar([mgr], "p")[1].bar["name"] == "Progress", "an id still works"
+    for args, text in (
+        ((both, "Progress"), "add 'device'"),
+        ((both, "Nope"), "No WLED bar"),
+        ((both, "Progress", "Attic"), "No WLED Bars device"),
+        ((both, "Nope", "Other"), "on 'Other'"),
+    ):
+        try:
+            manager_mod.resolve_bar(*args)
+        except manager_mod.BarLookupError as err:
+            assert text in str(err), err
+        else:
+            raise AssertionError(f"{args[1:]} should be refused")
+    again._apply([bar, dict(bar, id="q")], {})
+    try:
+        manager_mod.resolve_bar([again], "Progress")
+    except manager_mod.BarLookupError as err:
+        assert "rename one" in str(err), err
+    else:
+        raise AssertionError("two bars with one name on one strip should be refused")
+    print("ok bar lookup for services")
+
+    # ---- the clock: wake exactly when hours, windows or night dimming change ----
+    def local(h, m, sec=0):
+        return _dt(2026, 11, 9, h, m, sec).astimezone()
+
+    timed_bar = dict(bar, id="c", visibility={"conditions": [{"type": "time", "start": "09:00", "end": "17:00"}]})
+    again._apply([timed_bar], {})
+    assert abs(again._next_change(local(8, 59, 30)) - 30.05) < 0.01, again._next_change(local(8, 59, 30))
+    assert abs(again._next_change(local(9, 0)) - (8 * 3600 + 0.05)) < 0.01, "at a boundary, the next one"
+    assert abs(again._next_change(local(23, 0)) - (10 * 3600 + 0.05)) < 0.01, "across midnight"
+    again._apply([dict(timed_bar, enabled=False)], {})
+    assert again._next_change(local(8, 59, 30)) is None, "a switched-off bar needs no wake-up"
+    again._apply([dict(bar, id="c", visibility={"conditions": [{"type": "time", "start": "00:00", "end": "00:00", "days": [0]}]})], {})
+    assert abs(again._next_change(local(23, 59)) - 60.05) < 0.01, "days of the week change at midnight"
+    again._apply([dict(bar, id="w", source={"type": "window", "window_start": "07:00", "window_end": "23:00"})], {})
+    assert abs(again._next_change(local(6, 58)) - 120.05) < 0.01
+    again._apply([bar], {"night": {"mode": "schedule", "start": "22:00", "end": "07:00"}})
+    assert abs(again._next_change(local(21, 59, 50)) - 10.05) < 0.01
+    assert again._brightness(local(21, 59, 50)) == 1.0 and again._brightness(local(22, 0, 1)) == 0.2
+    assert again._brightness(local(7, 0, 30)) == 1.0, "night dimming ends on the minute, not a minute late"
+    again._apply([bar], {})
+    assert again._next_change(local(12, 0)) is None
+    # a countdown that has not started yet wakes the loop when it does
+    hass.set("sensor.done_at", (utc_now + timedelta(hours=3)).isoformat())
+    again._apply([dict(bar, id="f", source={"type": "timestamp", "end_entity": "sensor.done_at", "duration": 3600})], {})
+    assert again._source(again.runtimes[0], utc_now)[0] == "idle"
+    assert abs(again._next_change(utc_now) - 7200.05) < 0.01, again._next_change(utc_now)
+    if again._unsub_states:
+        again._unsub_states()
+    await mgr.async_save([bar], None)
+    await settle(mgr, fake, 0.3)
+    print("ok clock boundaries")
 
     # ---- per-bar entities ----
     eb = importlib.import_module("wb.entity_base")

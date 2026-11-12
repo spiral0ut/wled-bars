@@ -40,6 +40,35 @@ class WledBarsConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(self, user_input=None):
+        """Point an existing strip at a new address, keeping its bars."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        errors = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip().removeprefix("http://").rstrip("/")
+            try:
+                info = await self._probe(host)
+            except WledError:
+                errors["base"] = "cannot_connect"
+            else:
+                found = str(info.get("mac") or host).lower()
+                # entries made from a bare address have no MAC to compare with
+                known_mac = entry.unique_id and entry.unique_id != entry.data[CONF_HOST].lower()
+                if known_mac and info.get("mac") and found != entry.unique_id:
+                    errors["base"] = "wrong_device"
+                else:
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, CONF_HOST: host}
+                    )
+                    await self.hass.config_entries.async_reload(entry.entry_id)
+                    return self.async_abort(reason="reconfigure_successful")
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema({vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str}),
+            description_placeholders={"name": entry.title},
+            errors=errors,
+        )
+
     async def async_step_zeroconf(self, discovery_info):
         host = discovery_info.host
         try:

@@ -8,6 +8,11 @@ start_timer:
       required: true
       selector:
         text:
+    device:
+      name: Device
+      description: Name of the strip. Only needed when bars on different strips share a name.
+      selector:
+        text:
     duration:
       name: Duration
       required: true
@@ -19,7 +24,13 @@ stop_timer:
   fields:
     bar:
       name: Bar
+      description: Name or id of the bar.
       required: true
+      selector:
+        text:
+    device:
+      name: Device
+      description: Name of the strip. Only needed when bars on different strips share a name.
       selector:
         text:
 set_value:
@@ -28,7 +39,13 @@ set_value:
   fields:
     bar:
       name: Bar
+      description: Name or id of the bar.
       required: true
+      selector:
+        text:
+    device:
+      name: Device
+      description: Name of the strip. Only needed when bars on different strips share a name.
       selector:
         text:
     value:
@@ -40,10 +57,17 @@ set_value:
           step: any
 set_enabled:
   name: Enable or disable a bar
+  description: Turn one bar on or off, the same as its switch.
   fields:
     bar:
       name: Bar
+      description: Name or id of the bar.
       required: true
+      selector:
+        text:
+    device:
+      name: Device
+      description: Name of the strip. Only needed when bars on different strips share a name.
       selector:
         text:
     enabled:
@@ -62,7 +86,7 @@ flash:
         text:
     device:
       name: Device
-      description: Name of the WLED Bars device. Leave empty (with no bar) to flash every strip.
+      description: Name of the strip. Leave empty (with no bar) to flash every strip.
       selector:
         text:
     color:

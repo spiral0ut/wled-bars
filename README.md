@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.6.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.7.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -29,6 +29,8 @@ Drag across a picture of your strip to place a bar, point it at a sensor, timer 
 2. Restart Home Assistant.
 3. **Settings → Devices & services → Add integration → WLED Bars**, enter the WLED IP address. WLED devices on the network are also discovered automatically.
 4. Open **WLED Bars** in the sidebar.
+
+If a strip later gets a new IP address, open the device under **Settings → Devices & services → WLED Bars**, choose **⋮ → Reconfigure** and enter the new address. Its bars and settings are kept.
 
 Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 
@@ -65,7 +67,7 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 | When no bar shows | LEDs are handed back to WLED | WLED resumes by itself after ~2.5 s |
 | Best for | status bars sharing an ambient strip | a strip dedicated to bars, smooth pulses |
 
-With JSON, LED numbers count from the start of the chosen WLED segment; use a segment without grouping or spacing. DDP needs "Receive UDP realtime" enabled in WLED (the default).
+With JSON, LED numbers count from the start of the chosen WLED segment; use a segment without grouping or spacing. Loading a preset or changing the effect in WLED wipes the bars; they are drawn again within about five seconds. DDP needs "Receive UDP realtime" enabled in WLED (the default).
 
 ### Entities
 
@@ -89,7 +91,9 @@ Entities follow the bar: they are created when a bar is added, renamed with it (
 | `wled_bars.set_enabled` | `bar`, `enabled` | Turn one bar on or off |
 | `wled_bars.flash` | optional `bar` or `device`, `color`, `effect`, `duration`, `start`, `end` | Notification flash; see below |
 
-`bar` is the bar's name (or id).
+`bar` is the bar's name (or id). If bars on different strips share a name, add `device: <strip name>` to say which one; a name that still matches more than one bar is refused with an explanation rather than guessed.
+
+A timer started with `start_timer` and a value set with `set_value` (or the bar's number entity) are kept across a Home Assistant restart: a countdown carries on from where it should be by then.
 
 #### Notification flash
 
@@ -162,7 +166,9 @@ Checks fill, direction, caps, tip, colours, rules and markers, then renders 600 
 python3 tests/test_manager.py
 ```
 
-Runs the manager against a fake WLED device: range-compressed JSON output, sending only changed LEDs, releasing the segment, a blinking tip, a manual timer through completion, a timer entity, DDP packets and strip preview. Needs `aiohttp`; Home Assistant itself is stubbed.
+Runs the manager against a fake WLED device: range-compressed JSON output, sending only changed LEDs, releasing the segment, repainting after WLED wiped the LEDs, a blinking tip, a manual timer through completion and across a restart, a timer entity, DDP packets, strip preview, and waking on the minute for timed bars. Needs `aiohttp`; Home Assistant itself is stubbed.
+
+Both run on GitHub for every push, together with Home Assistant's and HACS's own checks of the integration (`.github/workflows/validate.yml`).
 
 ```bash
 python3 -m http.server 8765
