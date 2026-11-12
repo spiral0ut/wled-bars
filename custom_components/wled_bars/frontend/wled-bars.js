@@ -310,6 +310,61 @@ export function eventInfo(source, states, now = Date.now()) {
 // ---------- bar kinds: what each preset needs ----------
 // sources: which "follows" choices make sense; hide: add-ons that don't apply;
 // range: how the empty/full mapping is presented.
+// What a bar is doing right now, in plain words: {tone, text}.
+function barStatus(bar, i, o) {
+  const st = o.live[bar.id];
+  const states = o.states || {};
+  const nm = (id) => states[id]?.attributes?.friendly_name || id;
+  const getState = (id) => (states[id] ? states[id].state : null);
+  if (!o.enabled && !o.standby) return { tone: "", text: "Off · all bars are switched off" };
+  if (!bar.enabled) return { tone: "", text: "Switched off" };
+  if (!st) return { tone: "", text: "Waiting for the strip…" };
+  // standby: all bars are off, and the card says what each one would do if they were on
+  if (!o.enabled && st.would) return { tone: "would", text: st.state === "unavailable" ? "Would show the offline warning" : "Would show" };
+  if (st.visible) {
+    if (st.state === "unavailable") return { tone: "warn", text: "Showing the offline warning" };
+    const mine = E.barLeds(bar);
+    const cover = new Map();
+    o.bars.forEach((b, k) => {
+      if (k > i && o.live[b.id]?.visible) for (const led of E.barLeds(b)) cover.set(led, b.name);
+    });
+    const hit = mine.filter((led) => cover.has(led));
+    if (!hit.length) return { tone: "yes", text: "Showing" };
+    const by = [...new Set(hit.map((led) => cover.get(led)))].join(", ");
+    return hit.length === mine.length ? { tone: "warn", text: `Covered by ${by}` } : { tone: "yes", text: `Showing · partly covered by ${by}` };
+  }
+  const vis = bar.visibility;
+  const conds = (vis.entity ? [{ type: "state", entity: vis.entity, states: vis.states || "on" }] : []).concat(vis.conditions);
+  const failing = conds.filter((c) => !condOk(c, getState));
+  if (st.why === "conditions" || (!st.why && failing.length)) {
+    const times = failing.filter((c) => c.type === "time").map((c) => nextStart(c)).filter(Boolean).sort((a, b) => a - b);
+    const other = failing.find((c) => c.type !== "time" && c.entity);
+    if (other && !(vis.match === "any" && times.length)) {
+      const cur = getState(other.entity);
+      const unit = other.type === "numeric" ? states[other.entity]?.attributes?.unit_of_measurement || "" : "";
+      return { tone: "", text: cur === null ? `Hidden: ${nm(other.entity)} is missing` : `Hidden: ${nm(other.entity)} is ${cur}${unit}` };
+    }
+    if (times.length) return { tone: "", text: `Hidden until ${whenText(times[0])}` };
+    return { tone: "", text: "Hidden by its conditions" };
+  }
+  if (st.why === "unavailable" || st.state === "unavailable") return { tone: "bad", text: "Hidden: source unavailable" };
+  if (st.why === "zero") return { tone: "", text: "Hidden while at 0 %" };
+  if (st.why === "finished") return { tone: "", text: "Hidden: finished" };
+  const src = bar.source.type;
+  if (src === "timer") return { tone: "", text: "Hidden: timer isn’t running" };
+  if (src === "media") return { tone: "", text: "Hidden: nothing is playing" };
+  if (src === "ratio") return { tone: "", text: "Hidden: choose both sensors" };
+  if (src === "timestamp") {
+    const ev = eventInfo(bar.source, states);
+    if (ev && ev.left > 0 && ev.total > 0) return { tone: "", text: `Hidden until ${whenText(new Date(ev.end - ev.total * 1000))}` };
+    return { tone: "", text: bar.kind === "event" ? "Hidden: no upcoming event" : "Hidden: no finish time yet" };
+  }
+  if (src === "window") return { tone: "", text: `Hidden until ${bar.source.window_start}` };
+  if (src === "manual") return { tone: "", text: "Hidden: waiting for an automation" };
+  return { tone: "", text: "Hidden: nothing to show" };
+}
+
+
 const KINDS = {
   "": { sources: null, hide: [] },
   progress: { sources: ["entity", "manual"], hide: ["peak"], range: "percent" },
@@ -1265,54 +1320,7 @@ class WledBarsPanel extends HTMLElement {
 
   // One line saying what a bar is doing right now, and why if it is hidden.
   _statusOf(bar, i) {
-    const st = this._live.bars[bar.id];
-    const states = this._hass?.states || {};
-    const nm = (id) => states[id]?.attributes?.friendly_name || id;
-    const getState = (id) => (states[id] ? states[id].state : null);
-    if (!this._settings.enabled) return { tone: "", text: "Off · all bars are switched off" };
-    if (!bar.enabled) return { tone: "", text: "Switched off" };
-    if (!st) return { tone: "", text: "Waiting for the strip…" };
-    if (st.visible) {
-      if (st.state === "unavailable") return { tone: "warn", text: "Showing the offline warning" };
-      const mine = E.barLeds(bar);
-      const cover = new Map();
-      this._bars.forEach((b, k) => {
-        if (k > i && this._live.bars[b.id]?.visible) for (const led of E.barLeds(b)) cover.set(led, b.name);
-      });
-      const hit = mine.filter((led) => cover.has(led));
-      if (!hit.length) return { tone: "yes", text: "Showing" };
-      const by = [...new Set(hit.map((led) => cover.get(led)))].join(", ");
-      return hit.length === mine.length ? { tone: "warn", text: `Covered by ${by}` } : { tone: "yes", text: `Showing · partly covered by ${by}` };
-    }
-    const vis = bar.visibility;
-    const conds = (vis.entity ? [{ type: "state", entity: vis.entity, states: vis.states || "on" }] : []).concat(vis.conditions);
-    const failing = conds.filter((c) => !condOk(c, getState));
-    if (st.why === "conditions" || (!st.why && failing.length)) {
-      const times = failing.filter((c) => c.type === "time").map((c) => nextStart(c)).filter(Boolean).sort((a, b) => a - b);
-      const other = failing.find((c) => c.type !== "time" && c.entity);
-      if (other && !(vis.match === "any" && times.length)) {
-        const cur = getState(other.entity);
-        const unit = other.type === "numeric" ? states[other.entity]?.attributes?.unit_of_measurement || "" : "";
-        return { tone: "", text: cur === null ? `Hidden: ${nm(other.entity)} is missing` : `Hidden: ${nm(other.entity)} is ${cur}${unit}` };
-      }
-      if (times.length) return { tone: "", text: `Hidden until ${whenText(times[0])}` };
-      return { tone: "", text: "Hidden by its conditions" };
-    }
-    if (st.why === "unavailable" || st.state === "unavailable") return { tone: "bad", text: "Hidden: source unavailable" };
-    if (st.why === "zero") return { tone: "", text: "Hidden while at 0 %" };
-    if (st.why === "finished") return { tone: "", text: "Hidden: finished" };
-    const src = bar.source.type;
-    if (src === "timer") return { tone: "", text: "Hidden: timer isn’t running" };
-    if (src === "media") return { tone: "", text: "Hidden: nothing is playing" };
-    if (src === "ratio") return { tone: "", text: "Hidden: choose both sensors" };
-    if (src === "timestamp") {
-      const ev = eventInfo(bar.source, states);
-      if (ev && ev.left > 0 && ev.total > 0) return { tone: "", text: `Hidden until ${whenText(new Date(ev.end - ev.total * 1000))}` };
-      return { tone: "", text: bar.kind === "event" ? "Hidden: no upcoming event" : "Hidden: no finish time yet" };
-    }
-    if (src === "window") return { tone: "", text: `Hidden until ${bar.source.window_start}` };
-    if (src === "manual") return { tone: "", text: "Hidden: waiting for an automation" };
-    return { tone: "", text: "Hidden: nothing to show" };
+    return barStatus(bar, i, { bars: this._bars, live: this._live.bars, enabled: this._settings.enabled, states: this._hass?.states });
   }
 
   // Small message at the bottom of the screen, with an Undo button when there is something to undo.
@@ -2911,15 +2919,92 @@ if (!customElements.get("wled-bars-panel")) customElements.define("wled-bars-pan
 
 // ---------- dashboard card ----------
 
+const CARD_CSS = `
+:host{--wb-text:var(--primary-text-color,#e6e9ef);--wb-dim:var(--secondary-text-color,#9aa3b5);--wb-accent:var(--primary-color,#4f8cff);
+  --wb-line:var(--divider-color,rgba(128,128,128,.25));--wb-ok:var(--success-color,#3fbf6f);--wb-warn:var(--warning-color,#ffa600);
+  --wb-err:var(--error-color,#e5484d);display:block;color:var(--wb-text);font-size:14px}
+*{box-sizing:border-box}
+.body{padding:14px 16px 14px;display:flex;flex-direction:column;gap:10px}
+.hd{display:flex;align-items:center;gap:10px;min-height:24px}
+.hd .t{font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sum{font-size:12px;color:var(--wb-dim);white-space:nowrap;display:flex;align-items:center;gap:6px}
+.sum.off{color:var(--wb-dim)} .sum.bad{color:var(--wb-err)}
+.grow{flex:1}
+.stage{background:#0a0c11;border-radius:10px;padding:12px 10px 6px;position:relative}
+.stage canvas{display:block;width:100%;transition:opacity .2s ease}
+.stage.standby canvas{opacity:.5}
+.cap{font-size:11px;color:#8c95a8;text-align:center;padding:2px 0 4px;letter-spacing:.02em}
+.rows{display:flex;flex-direction:column}
+.row{display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;column-gap:10px;padding:7px 4px 6px;border-radius:8px;cursor:default;
+  transition:background .16s ease}
+.row:hover,.row.sel{background:color-mix(in srgb,var(--wb-text) 6%,transparent)}
+.row+.row{margin-top:1px}
+.swatch{width:10px;height:10px;border-radius:50%;border:2px solid var(--c,#667);background:var(--c,#667);transition:background .2s ease,opacity .2s ease}
+.row.hid .swatch{background:transparent;opacity:.75}
+.nm{min-width:0}
+.nm b{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nm span{display:block;font-size:12px;color:var(--wb-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nm span.would{color:var(--wb-accent)} .nm span.warn{color:var(--wb-warn)} .nm span.bad{color:var(--wb-err)}
+.val{font-variant-numeric:tabular-nums;font-size:13px;color:var(--wb-dim)}
+.row.on .val{color:var(--wb-text)}
+.meter{grid-column:2 / -1;height:3px;border-radius:3px;background:color-mix(in srgb,var(--wb-text) 10%,transparent);margin-top:5px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--c,#667);border-radius:3px;transition:width .4s ease,opacity .2s ease}
+.row.hid .meter i{opacity:.35}
+input.sw{appearance:none;-webkit-appearance:none;margin:0;width:36px;height:20px;border-radius:20px;background:color-mix(in srgb,var(--wb-text) 28%,transparent);
+  position:relative;cursor:pointer;transition:background .16s ease;flex:none}
+input.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .16s ease;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+input.sw:checked{background:var(--wb-accent)} input.sw:checked::after{left:18px}
+input.sw:focus-visible,a:focus-visible,input[type=range]:focus-visible{outline:2px solid var(--wb-accent);outline-offset:2px}
+.ft{display:flex;align-items:center;gap:10px;color:var(--wb-dim);font-size:12px}
+.ft input[type=range]{flex:1;accent-color:var(--wb-accent);min-width:0}
+a.ed{color:var(--wb-dim);display:flex;padding:2px;border-radius:6px} a.ed:hover{color:var(--wb-accent)}
+svg.i{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.msg{color:var(--wb-dim);font-size:13px}
+@media (pointer:coarse){.row{padding-top:10px;padding-bottom:9px}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+`;
+
 class WledBarsCard extends HTMLElement {
   setConfig(config) {
     this._config = config || {};
+    if (this._started) this._restart();
   }
   static getStubConfig() {
-    return {};
+    return { controls: true };
+  }
+  // The visual editor in the dashboard's "Edit card" dialog.
+  static getConfigForm() {
+    const labels = {
+      entry_id: "Strip", title: "Title (blank = the strip's name)", controls: "Switches to turn bars on and off",
+      brightness: "Brightness slider", strip: "Picture of the strip", bars: "List of bars",
+      preview: "While bars are off, show what would be displayed", hide_inactive: "Only list bars that are showing",
+    };
+    return {
+      schema: [
+        { name: "entry_id", selector: { config_entry: { integration: DOMAIN } } },
+        { name: "title", selector: { text: {} } },
+        { name: "controls", selector: { boolean: {} } },
+        { name: "brightness", selector: { boolean: {} } },
+        { name: "strip", selector: { boolean: {} } },
+        { name: "bars", selector: { boolean: {} } },
+        { name: "preview", selector: { boolean: {} } },
+        { name: "hide_inactive", selector: { boolean: {} } },
+      ],
+      computeLabel: (field) => labels[field.name] || field.name,
+    };
   }
   getCardSize() {
-    return 2;
+    return 2 + Math.ceil(((this._bars || []).length || 2) * 0.8);
+  }
+  getGridOptions() {
+    return { columns: 12, min_columns: 6 };
+  }
+
+  // An option is on unless the configuration says otherwise (given defaults aside).
+  _opt(key, fallback = true) {
+    const c = this._config || {};
+    if (key === "bars" && c.bars === undefined && c.show_bars !== undefined) return c.show_bars !== false; // pre-0.6 name
+    return c[key] === undefined ? fallback : c[key] !== false;
   }
 
   set hass(hass) {
@@ -2932,61 +3017,231 @@ class WledBarsCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._stop();
+  }
+
+  _stop() {
     if (this._unsub) this._unsub();
     this._unsub = null;
     this._started = false;
+    this._run = (this._run || 0) + 1; // anything still loading belongs to an old run
+    clearInterval(this._timer);
     if (this._ro) this._ro.disconnect();
+  }
+
+  _restart() {
+    this._stop();
+    if (this._hass && this.isConnected) this._start();
   }
 
   async _start() {
     this._started = true;
+    const run = (this._run = (this._run || 0) + 1);
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
     const root = this.shadowRoot;
     root.innerHTML = "";
-    const body = h("div", { style: "padding:12px 16px 16px" });
-    root.append(
-      h("style", {}, `.stage{background:#0a0c11;border-radius:12px;padding:12px 10px 6px}canvas{display:block;width:100%}
-        .r{display:flex;justify-content:space-between;gap:8px;padding:4px 2px;font-size:13px}.d{color:var(--secondary-text-color)}
-        a{color:var(--primary-color);text-decoration:none;font-size:12px}`),
-      h("ha-card", { header: this._config.title }, body)
-    );
+    const body = (this._body = h("div", { class: "body" }));
+    root.append(h("style", {}, CARD_CSS), h("ha-card", {}, body));
     try {
       const devices = await this._hass.callWS({ type: `${DOMAIN}/devices` });
-      const dev = devices.find((d) => d.entry_id === this._config.entry_id || d.name === this._config.device) || devices[0];
+      if (run !== this._run) return;
+      const c = this._config;
+      const dev = devices.find((d) => d.entry_id === c.entry_id || (c.device && d.name === c.device)) || (!c.entry_id && !c.device ? devices[0] : null);
       if (!dev) {
-        body.append(h("div", { class: "d" }, "No WLED Bars device configured."));
+        body.append(h("div", { class: "msg" }, devices.length ? "This strip is no longer set up in WLED Bars. Choose another in the card's settings." : "No WLED Bars strip is set up yet."));
         return;
       }
-      const data = await this._hass.callWS({ type: `${DOMAIN}/get`, entry_id: dev.entry_id });
+      this._dev = dev;
+      this._live = { pixels: [], bars: {}, online: dev.online, enabled: true, brightness: 100, rev: null };
+      await this._load(run);
+      if (run !== this._run) return;
+      const unsub = await this._hass.connection.subscribeMessage((msg) => this._onFrame(msg), { type: `${DOMAIN}/subscribe`, entry_id: dev.entry_id });
+      if (run !== this._run || !this.isConnected) return unsub();
+      this._unsub = unsub;
+      this._timer = setInterval(() => this._tick(), 150);
+    } catch (err) {
+      if (run === this._run) body.append(h("div", { class: "msg" }, `WLED Bars: ${err?.message || err}`));
+    }
+  }
+
+  // Fetch the bars and (re)build the card. Runs again whenever bars or settings are saved anywhere.
+  async _load(run = this._run) {
+    const data = await this._hass.callWS({ type: `${DOMAIN}/get`, entry_id: this._dev.entry_id });
+    if (run !== this._run) return;
+    this._dev = data.device || this._dev;
+    this._bars = data.bars;
+    this._live.enabled = !!data.settings.enabled;
+    this._live.brightness = data.settings.brightness;
+    this._build();
+    this._render(true);
+  }
+
+  _build() {
+    const body = this._body;
+    const controls = this._opt("controls");
+    const call = (msg) => this._hass.callWS({ type: `${DOMAIN}/control`, entry_id: this._dev.entry_id, ...msg }).catch((err) => {
+      this._sumEl.textContent = err?.message || "That didn’t work";
+      this._load();
+    });
+    body.innerHTML = "";
+    if (this._ro) this._ro.disconnect();
+
+    // header: name, one-line summary, master switch
+    this._sumEl = h("span", { class: "sum" });
+    this._master = controls && h("input", { type: "checkbox", class: "sw", title: "All bars on this strip", "aria-label": "All bars on this strip",
+      onchange: (e) => { this._live.enabled = e.target.checked; this._render(true); call({ enabled: e.target.checked }); } });
+    body.append(h("div", { class: "hd" },
+      h("span", { class: "t" }, this._config.title || this._dev.name), this._sumEl, h("span", { class: "grow" }),
+      controls && this._hass.user?.is_admin && h("a", { class: "ed", href: "/wled-bars", title: "Edit bars", "aria-label": "Edit bars" }, ic("settings", 17)),
+      this._master));
+
+    // the strip itself
+    this._strip = null;
+    if (this._opt("strip")) {
       const canvas = h("canvas");
-      const strip = new StripView(canvas, { max: 20 });
-      strip.pixels = new Array(dev.led_count).fill([0, 0, 0]);
-      const rows = {};
-      body.append(h("div", { class: "stage" }, canvas));
-      if (this._config.show_bars !== false) {
-        for (const bar of data.bars) {
-          rows[bar.id] = h("span", {}, "–");
-          body.append(h("div", { class: "r" }, h("span", {}, bar.name), rows[bar.id]));
+      this._strip = new StripView(canvas, { max: 20 });
+      this._capEl = h("div", { class: "cap", style: "display:none" });
+      this._stageEl = h("div", { class: "stage" }, canvas, this._capEl);
+      body.append(this._stageEl);
+      this._ro = new ResizeObserver(() => this._strip.draw());
+      this._ro.observe(canvas);
+    }
+
+    // one row per bar
+    this._rows = [];
+    if (this._opt("bars")) {
+      const list = h("div", { class: "rows" });
+      this._bars.forEach((bar, index) => {
+        const row = { bar, index };
+        row.st = h("span", {});
+        row.val = h("span", { class: "val" });
+        row.fill = h("i");
+        row.sw = controls && h("input", { type: "checkbox", class: "sw", checked: bar.enabled, "aria-label": `Show ${bar.name}`,
+          onclick: (e) => e.stopPropagation(),
+          onchange: (e) => { bar.enabled = e.target.checked; this._render(true); call({ bar: bar.id, bar_enabled: e.target.checked }); } });
+        // pointing at a row marks its LEDs on the strip (and sketches the bar there if it is hidden)
+        const pick = (on) => { this._sel = on ? bar.id : this._sel === bar.id ? null : this._sel; this._render(true); };
+        row.el = h("div", { class: "row", onmouseenter: () => pick(true), onmouseleave: () => pick(false),
+          onclick: () => { if (matchMedia("(hover:none)").matches) pick(this._sel !== bar.id); } },
+          h("span", { class: "swatch" }), h("div", { class: "nm" }, h("b", {}, bar.name), row.st), row.val, row.sw || h("span"),
+          h("div", { class: "meter" }, row.fill));
+        this._rows.push(row);
+        list.append(row.el);
+      });
+      if (!this._bars.length) list.append(h("div", { class: "msg" }, "No bars yet."));
+      body.append(list);
+    }
+
+    this._bright = null;
+    if (controls && this._opt("brightness", false)) {
+      this._bright = h("input", { type: "range", min: 1, max: 100, step: 1, "aria-label": "Brightness",
+        oninput: (e) => { this._brightVal.textContent = `${e.target.value} %`; },
+        onchange: (e) => { this._live.brightness = Number(e.target.value); call({ brightness: Number(e.target.value) }); } });
+      this._brightVal = h("span", { style: "min-width:38px;text-align:right" });
+      body.append(h("div", { class: "ft" }, ic("sun", 16), this._bright, this._brightVal));
+    }
+  }
+
+  _onFrame(msg) {
+    const L = this._live;
+    L.pixels = hexToPixels(msg.leds || "");
+    L.online = msg.online !== false;
+    L.bars = {};
+    for (const st of msg.bars || []) if (st) L.bars[st.id] = st;
+    if (msg.enabled !== undefined) L.enabled = !!msg.enabled;
+    if (msg.brightness !== undefined) L.brightness = msg.brightness;
+    if (msg.rev !== undefined && msg.rev !== L.rev) {
+      const first = L.rev === null;
+      L.rev = msg.rev;
+      if (!first) return void this._load().catch(() => {});
+    }
+    this._render(true);
+  }
+
+  // The strip animates by itself while it shows a sketch; status wording follows Home Assistant about once a second.
+  _tick() {
+    this._n = (this._n || 0) + 1;
+    this._render(this._n % 7 === 0);
+  }
+
+  // What a bar would look like right now.
+  _sketch(bar, st, t) {
+    const states = this._hass.states;
+    const getState = (id) => (states[id] ? states[id].state : null);
+    const frac = st && st.state === "active" ? st.percent / 100 : 0.6;
+    return E.renderBar(bar, { t, frac, brightness: 1, unavailable: !!st && st.state === "unavailable",
+      rule: E.pickRule(bar, st ? st.value : null, frac * 100, getState) });
+  }
+
+  _render(texts) {
+    if (!this._bars || !this._live) return;
+    const L = this._live;
+    const n = this._dev.led_count;
+    const t = performance.now() / 1000;
+    const standby = !L.enabled;
+    const preview = standby && this._opt("preview");
+    const selBar = this._sel && this._bars.find((b) => b.id === this._sel);
+    const selHidden = selBar && !L.bars[selBar.id]?.visible && !(preview && L.bars[selBar.id]?.would);
+    if (!texts && !preview && !selHidden) return; // nothing moves by itself
+
+    if (this._strip) {
+      const px = Array.from({ length: n }, (_x, i) => (standby ? [0, 0, 0] : L.pixels[i] || [0, 0, 0]));
+      if (preview) {
+        for (const bar of this._bars) {
+          const st = L.bars[bar.id];
+          if (!st?.would) continue;
+          const sk = this._sketch(bar, st, t);
+          E.barLeds(bar).forEach((idx, i) => { if (idx < n) px[idx] = sk[i]; });
         }
       }
-      body.append(h("div", { style: "text-align:right;margin-top:6px" }, h("a", { href: "/wled-bars" }, "Edit bars")));
-      this._ro = new ResizeObserver(() => strip.draw());
-      this._ro.observe(canvas);
-      const unsub = await this._hass.connection.subscribeMessage(
-        (msg) => {
-          const px = hexToPixels(msg.leds);
-          strip.pixels = Array.from({ length: dev.led_count }, (_x, i) => px[i] || [0, 0, 0]);
-          strip.draw();
-          for (const st of msg.bars || []) {
-            if (st && rows[st.id]) rows[st.id].textContent = st.state === "active" ? `${fmt(st.percent)} %` : st.state === "unavailable" ? "unavailable" : "idle";
-          }
-        },
-        { type: `${DOMAIN}/subscribe`, entry_id: dev.entry_id }
-      );
-      if (this.isConnected) this._unsub = unsub;
-      else unsub();
-    } catch (err) {
-      body.append(h("div", { class: "d" }, `WLED Bars: ${err?.message || err}`));
+      if (selHidden) {
+        // a faint sketch of the hidden bar, only where the strip is dark
+        const sk = this._sketch(selBar, L.bars[selBar.id], t);
+        E.barLeds(selBar).forEach((idx, i) => {
+          if (idx < n && !Math.max(...px[idx])) px[idx] = sk[i].map((v) => Math.round(v * (preview ? 0.5 : 0.22)));
+        });
+      }
+      this._strip.pixels = px;
+      this._strip.ranges = selBar ? [{ start: selBar.start, end: selBar.end, color: "#c9d1e3" }] : [];
+      this._strip.draw();
+    }
+    if (!texts) return;
+
+    const shown = this._bars.filter((b) => L.bars[b.id]?.visible).length;
+    const would = this._bars.filter((b) => L.bars[b.id]?.would).length;
+    this._sumEl.className = "sum" + (!L.online ? " bad" : standby ? " off" : "");
+    this._sumEl.textContent = !L.online ? "Strip offline" : standby ? "Bars off" : shown ? `${shown} showing` : "Nothing showing";
+    if (this._master) this._master.checked = L.enabled;
+    if (this._strip) {
+      this._stageEl.classList.toggle("standby", preview);
+      const cap = preview ? (would ? "Preview · this is what would show" : "Nothing would show right now") : "";
+      this._capEl.textContent = cap;
+      this._capEl.style.display = cap ? "" : "none";
+    }
+    const hideInactive = this._opt("hide_inactive", false);
+    for (const row of this._rows) {
+      const { bar } = row;
+      const st = L.bars[bar.id];
+      const info = barStatus(bar, row.index, { bars: this._bars, live: L.bars, enabled: L.enabled, states: this._hass.states, standby: true });
+      const on = !!st?.visible;
+      const pct = st && st.state === "active" ? st.percent : null;
+      // colour: what is on the strip now, else what the bar would use
+      let best = null, level = 0;
+      const pxs = on ? E.barLeds(bar).map((idx) => L.pixels[idx] || [0, 0, 0]) : this._sketch(bar, st && st.state === "active" && st.percent < 15 ? { ...st, percent: 15 } : st, 0);
+      for (const p of pxs) { const lv = Math.max(p[0], p[1], p[2]); if (lv > level) { level = lv; best = p; } }
+      const k = best ? 255 / Math.max(120, level) : 1; // a swatch should be readable even when the strip is dim
+      row.el.style.setProperty("--c", best ? `rgb(${best.map((v) => Math.min(255, Math.round(v * k))).join(",")})` : "#667");
+      row.el.className = "row" + (on ? " on" : " hid") + (this._sel === bar.id ? " sel" : "");
+      row.el.style.display = hideInactive && !on && !(standby && st?.would) ? "none" : "";
+      if (row.st.textContent !== info.text) row.st.textContent = info.text;
+      row.st.className = info.tone === "would" || info.tone === "warn" || info.tone === "bad" ? info.tone : "";
+      row.val.textContent = pct === null ? "–" : `${Math.round(pct)} %`;
+      row.fill.style.width = `${pct === null ? 0 : pct}%`;
+      if (row.sw && row.sw.checked !== !!bar.enabled) row.sw.checked = !!bar.enabled;
+    }
+    if (this._bright && this.shadowRoot.activeElement !== this._bright) {
+      this._bright.value = L.brightness;
+      this._brightVal.textContent = `${L.brightness} %`;
     }
   }
 }
@@ -2997,6 +3252,8 @@ if (!window.customCards.some((c) => c.type === "wled-bars-card")) {
   window.customCards.push({
     type: "wled-bars-card",
     name: "WLED Bars",
-    description: "Live view of the progress and status bars on a WLED strip.",
+    description: "What a WLED strip is showing right now, bar by bar, with optional switches.",
+    preview: true,
+    documentationURL: "https://github.com/spiral0ut/wled-bars#dashboard-card",
   });
 }

@@ -51,6 +51,7 @@ let settings = { enabled: true, brightness: 100, transport: "json", segment: 0, 
 let preview = null;
 let flash = null; // {color, effect, until, t0}
 let presets = {};
+let rev = 1; // goes up on every save, like the real integration
 const device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
   segments: [{ id: 0, start: 0, stop: LEDS, name: "" }] };
 const listeners = new Set();
@@ -96,10 +97,12 @@ setInterval(() => {
     const target = info && info.frac !== null ? info.frac : ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
     shown[bar.id] = shown[bar.id] === undefined ? target : shown[bar.id] + (target - shown[bar.id]) * 0.15;
     if (target >= 1) fullSince[bar.id] = fullSince[bar.id] ?? t; else delete fullSince[bar.id];
-    const allowed = settings.enabled && bar.enabled && conditionsOk(bar.visibility, getState);
+    const condsOk = conditionsOk(bar.visibility, getState);
+    const allowed = settings.enabled && bar.enabled && condsOk;
     const visible = allowed && !(preview && preview.bar.id === bar.id);
-    const why = allowed ? undefined : settings.enabled && bar.enabled ? "conditions" : "disabled";
-    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: allowed, why });
+    const why = allowed ? undefined : bar.enabled && !condsOk ? "conditions" : "disabled";
+    const would = !settings.enabled && bar.enabled && condsOk ? true : undefined; // what the Bars switch is holding back
+    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: allowed, why, would });
     if (visible) draw(bar, shown[bar.id], { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
   }
   if (preview) draw(preview.bar, preview.frac);
@@ -109,7 +112,7 @@ setInterval(() => {
     leds.fill(rgb);
   }
   const hex = leds.map((p) => p.map((c) => c.toString(16).padStart(2, "0")).join("")).join("");
-  for (const cb of listeners) cb({ leds: hex, online: true, bars: status });
+  for (const cb of listeners) cb({ leds: hex, online: true, enabled: settings.enabled, brightness: settings.brightness, rev, bars: status });
 }, 80);
 
 const hass = {
@@ -124,7 +127,15 @@ const hass = {
     if (type === "save") {
       if (msg.bars) bars = msg.bars.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
       if (msg.settings) settings = msg.settings;
+      rev++;
       return { bars, settings };
+    }
+    if (type === "control") {
+      if (msg.enabled !== undefined) settings = { ...settings, enabled: msg.enabled };
+      if (msg.brightness !== undefined) settings = { ...settings, brightness: msg.brightness };
+      if (msg.bar) bars = bars.map((b) => (b.id === msg.bar ? { ...b, enabled: msg.bar_enabled } : b));
+      rev++;
+      return null;
     }
     if (type === "flash") { flash = { color: msg.color, effect: msg.effect, until: Date.now() + msg.duration * 1000, t0: performance.now() / 1000 }; return null; }
     if (type === "preview") { preview = msg.bar ? { bar: E.normalizeBar(msg.bar), frac: msg.frac ?? 0.5 } : null; return null; }
@@ -134,7 +145,33 @@ const hass = {
     async subscribeMessage(cb) { listeners.add(cb); return () => listeners.delete(cb); },
   },
 };
-const panel = document.createElement("wled-bars-panel");
+// ?card shows dashboard cards instead of the editor
+const cards = query.has("card");
+if (cards) {
+  hass.user = { is_admin: true };
+  bars = bars.concat([
+    { id: "c3", name: "Phone battery", start: 28, end: 31, kind: "battery", source: { entity: "sensor.phone_battery" },
+      visibility: { conditions: [{ type: "state", entity: "binary_sensor.printer_printing", states: "off" }] } },
+  ].map(E.normalizeBar));
+  customElements.define("ha-card", class extends HTMLElement {
+    connectedCallback() {
+      this.style.cssText = "display:block;background:var(--card-background-color,#1c1f27);border-radius:12px;border:1px solid var(--divider-color,rgba(255,255,255,.12));color:var(--primary-text-color,#e6e9ef);font-family:system-ui,sans-serif";
+    }
+  });
+}
+const panel = document.createElement(cards ? "div" : "wled-bars-panel");
+if (cards) {
+  panel.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;padding:16px;align-items:start;max-width:1100px;margin:0 auto";
+  const configs = [{ title: "With switches" }, { title: "Read-only", controls: false }, { title: "Compact", strip: false, hide_inactive: true, controls: false },
+    { title: "Everything", brightness: true }];
+  panel.cards = configs.map((config) => {
+    const card = document.createElement("wled-bars-card");
+    card.setConfig(config);
+    panel.append(card);
+    return card;
+  });
+  Object.defineProperty(panel, "hass", { set(v) { for (const card of this.cards) card.hass = v; } });
+}
 if (query.get("theme") === "light") {
   document.body.style.background = "#fafafa";
   const vars = { "--primary-background-color": "#fafafa", "--card-background-color": "#ffffff", "--primary-text-color": "#212121",

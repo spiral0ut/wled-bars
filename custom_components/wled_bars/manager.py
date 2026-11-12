@@ -208,6 +208,7 @@ class BarsManager:
             rt = old.get(bar["id"]) or BarRuntime(bar)
             rt.bar = bar
             self.runtimes.append(rt)
+        self._rev = getattr(self, "_rev", 0) + 1
         self._track_entities()
         self._wake.set()
 
@@ -334,6 +335,9 @@ class BarsManager:
         return {
             "leds": leds,
             "online": self.online,
+            "enabled": bool(self.settings["enabled"]),
+            "brightness": self.settings["brightness"],
+            "rev": self._rev,  # goes up whenever bars or settings are saved
             "bars": [rt.status for rt in self.runtimes],
         }
 
@@ -609,6 +613,24 @@ class BarsManager:
         oc = bar["on_complete"]
         return engine.num(oc["duration"], 0.0) if oc["effect"] != "none" else 0.0
 
+    def _would_hide(self, bar: dict, state: str, frac: float, utc: datetime) -> str | None:
+        """Why a bar would stay hidden with the Bars switch on (None = it would show)."""
+        vis = bar["visibility"]
+        if vis["entity"]:
+            current = self._state(vis["entity"])
+            allowed = [s.strip().lower() for s in str(vis["states"]).split(",") if s.strip()] or ["on"]
+            if current is None or current.lower() not in allowed:
+                return "conditions"
+        if not self._conditions_ok(vis, utc):
+            return "conditions"
+        if state == "unavailable":
+            return "unavailable" if bar["unavailable"]["mode"] == "hide" else None
+        if state == "idle" and vis["hide_when_idle"]:
+            return "idle"
+        if vis["hide_at_zero"] and frac <= 0.0:
+            return "zero"
+        return None
+
     def _evaluate(self, rt: BarRuntime, now: float, utc: datetime, bright: float) -> dict | None:
         """Work out what this bar should show. Returns a render ctx, or None if hidden."""
         bar = rt.bar
@@ -631,6 +653,12 @@ class BarsManager:
 
         if not self.settings["enabled"] or not bar["enabled"]:
             rt.dist_start = None  # an "auto" trip starts over when the bar next appears
+            if bar["enabled"]:
+                # all bars are switched off: say what this one would do if they were on
+                why = self._would_hide(bar, state, frac, utc)
+                if why is None:
+                    rt.status["would"] = True
+                return hidden(why or "disabled")
             return hidden("disabled")
 
         vis = bar["visibility"]

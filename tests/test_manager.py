@@ -311,6 +311,24 @@ async def main():
     await settle(mgr, fake)
     assert mgr.runtimes[0].status.get("why") == "conditions", mgr.runtimes[0].status
     print("ok hidden bars report why")
+
+    # with the Bars switch off, the status says what each bar would do if it were on
+    seen = []
+    stop_listening = mgr.add_listener(seen.append)
+    await mgr.async_save(None, dict(mgr.settings, enabled=False))
+    await settle(mgr, fake)
+    st = mgr.runtimes[0].status
+    assert not st["visible"] and st.get("why") == "conditions" and "would" not in st, st
+    await mgr.async_save([dict(drain, visibility={})], None)
+    await settle(mgr, fake)
+    st = mgr.runtimes[0].status
+    assert not st["visible"] and st.get("would") is True and st.get("why") == "disabled", st
+    assert seen[-1]["enabled"] is False and seen[-1]["rev"] > seen[0]["rev"] and seen[-1]["brightness"] == mgr.settings["brightness"], seen[-1]
+    stop_listening()
+    await mgr.async_save(None, dict(mgr.settings, enabled=True))
+    await settle(mgr, fake)
+    assert mgr.runtimes[0].status["visible"] and "would" not in mgr.runtimes[0].status
+    print("ok switched-off strip reports what would show")
     print("ok timer entity countdown:", status["percent"], "% left")
 
     # DDP transport

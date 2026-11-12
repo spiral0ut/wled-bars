@@ -107,6 +107,40 @@ def ws_flash(hass, connection, msg) -> None:
 
 
 @websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/control",
+        vol.Required("entry_id"): str,
+        vol.Optional("enabled"): bool,
+        vol.Optional("brightness"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+        vol.Optional("bar"): str,
+        vol.Optional("bar_enabled"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_control(hass, connection, msg) -> None:
+    """The dashboard card's controls: the same things the switches and the brightness number do."""
+    mgr = _manager(hass, connection, msg)
+    if not mgr:
+        return
+    settings = None
+    if "enabled" in msg or "brightness" in msg:
+        settings = dict(mgr.settings)
+        if "enabled" in msg:
+            settings["enabled"] = msg["enabled"]
+        if "brightness" in msg:
+            settings["brightness"] = msg["brightness"]
+    bars = None
+    if "bar" in msg and "bar_enabled" in msg:
+        bars = [dict(b) for b in mgr.bars]
+        for bar in bars:
+            if bar["id"] == msg["bar"]:
+                bar["enabled"] = msg["bar_enabled"]
+    if bars is not None or settings is not None:
+        await mgr.async_save(bars, settings)
+    connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/subscribe", vol.Required("entry_id"): str}
 )
 @callback
@@ -160,7 +194,7 @@ async def ws_presets_save(hass, connection, msg) -> None:
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     for command in (
-        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_subscribe,
+        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_control, ws_subscribe,
         ws_presets_get, ws_presets_save,
     ):
         websocket_api.async_register_command(hass, command)

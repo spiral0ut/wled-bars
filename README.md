@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.5.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.6.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -54,7 +54,7 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, distance, media playback, solar vs. house use, event countdown, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
-- **Dashboard card:** add the *WLED Bars* card for a live view (`type: custom:wled-bars-card`, optional `title`, `entry_id` or `device`, `show_bars: false`).
+- **Dashboard card:** add the *WLED Bars* card to any dashboard (see [Dashboard card](#dashboard-card)).
 
 ### Two ways of sending frames (Device settings)
 
@@ -103,6 +103,28 @@ data:
 ```
 
 Leave out `bar` to flash a whole strip: `device: Desk strip` picks one, and with neither every strip flashes. `start` and `end` limit it to an LED range. The flash is drawn over whatever the bars are showing and follows the strip's brightness and night dimming; it does nothing while the device's **Bars** switch is off.
+
+## Dashboard card
+
+Add the **WLED Bars** card from the dashboard's card picker. It shows the strip as it is right now, and one row per bar with its colour, what it is doing in plain words (*Showing*, *Hidden until 22:00*, *Switched off*…) and how full it is. Point at a row to mark that bar's LEDs on the strip; a hidden bar is sketched faintly in its place.
+
+While the strip's **Bars** switch is off, the card shows a dimmed preview of what would be displayed if it were on, and each row says *Would show* or why it would stay hidden.
+
+Everything is set in the card's visual editor, or in YAML:
+
+```yaml
+type: custom:wled-bars-card
+entry_id: <strip>        # or device: "Desk strip"; blank = the first strip
+title: Desk strip        # blank = the strip's name
+controls: true           # false = read-only: no switches
+brightness: false        # true adds a brightness slider (needs controls)
+strip: true              # the picture of the strip
+bars: true               # the list of bars
+preview: true            # while bars are off, show what would be displayed
+hide_inactive: false     # true lists only bars that are showing
+```
+
+With `controls` on, the card has a switch for all bars and one per bar; these do the same as the switch entities, and work for users who are not administrators.
 
 ## How it compares
 
