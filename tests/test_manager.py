@@ -409,6 +409,73 @@ async def main():
     assert mgr._distance(dist_bar())[0] == "unavailable"
     print("ok distance source")
 
+    # ---- media playback position ----
+    def src_bar(**src):
+        return manager_mod.BarRuntime(engine.normalize_bar({"source": src}))
+
+    utc = manager_mod.dt_util.utcnow()
+    rt = src_bar(type="media", entity="media_player.tv")
+    assert mgr._source(rt, utc)[0] == "unavailable"
+    hass.set("media_player.tv", "idle", {})
+    assert mgr._source(rt, utc)[0] == "idle"
+    hass.set("media_player.tv", "paused", {"media_duration": 200, "media_position": 50})
+    assert mgr._source(rt, utc) == ("active", 0.25, 150.0)
+    hass.set("media_player.tv", "playing", {"media_duration": 200, "media_position": 50,
+                                            "media_position_updated_at": (utc - timedelta(seconds=30)).isoformat()})
+    state, frac, left = mgr._source(rt, utc)
+    assert state == "active" and abs(frac - 0.4) < 0.001 and abs(left - 120) < 0.2, (state, frac, left)
+    assert rt.total == 200
+    hass.set("media_player.tv", "playing", {"media_position": 5})  # live stream: no length
+    assert mgr._source(rt, utc)[0] == "idle"
+    print("ok media playback source")
+
+    # ---- one value as a share of another (solar against house use) ----
+    rt = src_bar(type="ratio", entity="sensor.solar", entity2="sensor.house")
+    assert mgr._source(rt, utc)[0] == "unavailable"
+    hass.set("sensor.solar", 1200, {"unit_of_measurement": "W"})
+    hass.set("sensor.house", 2.0, {"unit_of_measurement": "kW"})
+    assert mgr._source(rt, utc) == ("active", 0.6, 60.0)
+    hass.set("sensor.solar", 5000, {"unit_of_measurement": "W"})
+    assert mgr._source(rt, utc)[1] == 1.0, "more solar than use is a full bar"
+    hass.set("sensor.house", 0, {"unit_of_measurement": "kW"})
+    assert mgr._source(rt, utc)[1] == 1.0
+    hass.set("sensor.solar", 0, {"unit_of_measurement": "W"})
+    assert mgr._source(rt, utc)[1] == 0.0
+    print("ok ratio source")
+
+    # ---- countdown to a calendar event or a date ----
+    soon = utc + timedelta(hours=6)
+    hass.set("calendar.bins", "off", {"start_time": soon.strftime("%Y-%m-%d %H:%M:%S")})
+    assert abs((mgr._time("calendar.bins") - soon).total_seconds()) < 1.5
+    rt = src_bar(type="timestamp", end_entity="calendar.bins", duration=24 * 3600)
+    state, frac, left = mgr._source(rt, utc)
+    assert state == "active" and abs(frac - 0.75) < 0.001, (state, frac)
+    hass.set("calendar.bins", "off", {"start_time": (utc + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")})
+    assert mgr._source(rt, utc)[0] == "idle", "more than the lead time away: nothing to show yet"
+    hass.set("calendar.bins", "off", {})
+    assert mgr._source(rt, utc)[0] == "idle"
+    hass.set("sensor.bin_day", "2031-03-04")
+    assert mgr._time("sensor.bin_day").strftime("%Y-%m-%d %H:%M") == "2031-03-04 00:00"
+    print("ok calendar and date countdown")
+
+    # ---- notification flash ----
+    hass.set("sensor.progress", 50)
+    await mgr.async_save([bar], dict(mgr.settings, transport="json"))
+    await settle(mgr, fake, 0.3)
+    mgr.flash(None, "#0000ff", "solid", 0.8)
+    await asyncio.sleep(0.4)
+    assert mgr._last_frame.get(0) == (0, 0, 255) and mgr._last_frame.get(39) == (0, 0, 255), mgr._last_frame.get(0)
+    await asyncio.sleep(1.0)
+    assert mgr._flash is None and mgr._last_frame.get(0) is None and mgr._last_frame.get(10) == (255, 0, 0), "the bar comes back"
+    mgr.flash([3, 4], "#00ff00", "strobe", 0.6)
+    seen = set()
+    for _ in range(20):
+        await asyncio.sleep(0.02)
+        seen.add(mgr._last_frame.get(3))
+    assert (0, 255, 0) in seen and (0, 0, 0) in seen and mgr._last_frame.get(5) is None, seen
+    await asyncio.sleep(0.5)
+    print("ok notification flash")
+
     # ---- per-bar entities ----
     eb = importlib.import_module("wb.entity_base")
     switch_mod = importlib.import_module("wb.switch")

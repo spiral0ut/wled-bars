@@ -11,7 +11,7 @@
      Serve the repository root (python3 -m http.server) and open /demo/. -->
 <script type="module">
 import * as E from "../custom_components/wled_bars/frontend/engine.js";
-import { conditionsOk, distanceInfo } from "../custom_components/wled_bars/frontend/wled-bars.js";
+import { conditionsOk, distanceInfo, mediaInfo, ratioInfo, eventInfo } from "../custom_components/wled_bars/frontend/wled-bars.js";
 
 // ?leds=165 tries a long strip, ?theme=light a light Home Assistant theme
 const query = new URLSearchParams(location.search);
@@ -28,6 +28,12 @@ const states = {
   "person.matt": { state: "not_home", attributes: { friendly_name: "Matt", latitude: 38.9, longitude: -77.12 } },
   "device_tracker.car": { state: "not_home", attributes: { friendly_name: "Car", latitude: 38.93, longitude: -77.08 } },
   "sensor.phone_distance": { state: "21000", attributes: { friendly_name: "Phone distance from home", unit_of_measurement: "ft" } },
+  "media_player.living_room_tv": { state: "playing", attributes: { friendly_name: "Living room TV", media_title: "Demo film", media_duration: 240, media_position: 0, media_position_updated_at: new Date().toISOString() } },
+  "sensor.solar_power": { state: "1200", attributes: { friendly_name: "Solar power", unit_of_measurement: "W", device_class: "power" } },
+  "sensor.house_power": { state: "2.0", attributes: { friendly_name: "House power", unit_of_measurement: "kW", device_class: "power" } },
+  "calendar.bins": { state: "off", attributes: { friendly_name: "Bin collection", message: "Recycling",
+    start_time: new Date(Date.now() + 5 * 3600e3 - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 19).replace("T", " ") } },
+  "sensor.next_holiday": { state: new Date(Date.now() + 9 * 86400e3).toISOString().slice(0, 10), attributes: { friendly_name: "Next holiday", device_class: "date" } },
   "timer.kitchen": { state: "idle", attributes: { friendly_name: "Kitchen timer" } },
   "binary_sensor.printer_printing": { state: "on", attributes: { friendly_name: "Printer printing" } },
 };
@@ -43,6 +49,7 @@ let bars = [
 let settings = { enabled: true, brightness: 100, transport: "json", segment: 0, fps: 0, auto_power: true, idle: "release",
   night: { mode: "off", start: "22:00", end: "07:00", entity: "", level: 20 } };
 let preview = null;
+let flash = null; // {color, effect, until, t0}
 let presets = {};
 const device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
   segments: [{ id: 0, start: 0, stop: LEDS, name: "" }] };
@@ -54,6 +61,10 @@ setInterval(() => {
   const t = performance.now() / 1000;
   states["sensor.printer_progress"].state = String(Math.min(100, Math.round(((t % 40) / 30) * 1000) / 10));
   states["sensor.living_room_temperature"].state = (72 + 8 * Math.sin(t / 7)).toFixed(1);
+  states["sensor.solar_power"].state = String(Math.round(1500 + 1400 * Math.sin(t / 9)));
+  // the film starts again when it ends
+  const tv = states["media_player.living_room_tv"].attributes;
+  if ((Date.now() - Date.parse(tv.media_position_updated_at)) / 1000 > tv.media_duration) tv.media_position_updated_at = new Date().toISOString();
   // Matt drives from work towards home, over and over
   states["person.matt"].attributes.longitude = -77.2 + 0.2 * ((t % 60) / 55 > 1 ? 1 : (t % 60) / 55);
 }, 500);
@@ -75,8 +86,14 @@ setInterval(() => {
   for (const bar of bars) {
     const v = E.num(getState(bar.source.entity), null);
     const ok = bar.source.type === "entity" && v !== null;
-    const dist = bar.source.type === "distance" ? distanceInfo(bar.source, states) : null;
-    const target = dist && dist.frac !== null ? dist.frac : ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
+    const kind = bar.source.type;
+    const info = kind === "distance" ? distanceInfo(bar.source, states) : kind === "media" ? mediaInfo(bar.source, states)
+      : kind === "ratio" ? ratioInfo(bar.source, states) : kind === "timestamp" ? eventInfo(bar.source, states) : null;
+    if (["media", "ratio", "timestamp"].includes(kind) && (!info || info.frac === null)) {
+      status.push({ id: bar.id, state: "idle", percent: 0, value: null, visible: false, why: "idle" });
+      continue;
+    }
+    const target = info && info.frac !== null ? info.frac : ok ? E.valueToFrac(bar, v) : (t % 20) / 20;
     shown[bar.id] = shown[bar.id] === undefined ? target : shown[bar.id] + (target - shown[bar.id]) * 0.15;
     if (target >= 1) fullSince[bar.id] = fullSince[bar.id] ?? t; else delete fullSince[bar.id];
     const allowed = settings.enabled && bar.enabled && conditionsOk(bar.visibility, getState);
@@ -86,6 +103,11 @@ setInterval(() => {
     if (visible) draw(bar, shown[bar.id], { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
   }
   if (preview) draw(preview.bar, preview.frac);
+  if (flash && Date.now() < flash.until) {
+    const level = flash.effect === "pulse" ? 0.1 + 0.9 * (0.5 - 0.5 * Math.cos(((t - flash.t0) / 1.2) * 2 * Math.PI)) : 1;
+    const rgb = [1, 3, 5].map((i) => Math.round(parseInt(flash.color.substr(i, 2), 16) * level));
+    leds.fill(rgb);
+  }
   const hex = leds.map((p) => p.map((c) => c.toString(16).padStart(2, "0")).join("")).join("");
   for (const cb of listeners) cb({ leds: hex, online: true, bars: status });
 }, 80);
@@ -104,6 +126,7 @@ const hass = {
       if (msg.settings) settings = msg.settings;
       return { bars, settings };
     }
+    if (type === "flash") { flash = { color: msg.color, effect: msg.effect, until: Date.now() + msg.duration * 1000, t0: performance.now() / 1000 }; return null; }
     if (type === "preview") { preview = msg.bar ? { bar: E.normalizeBar(msg.bar), frac: msg.frac ?? 0.5 } : null; return null; }
     return null;
   },

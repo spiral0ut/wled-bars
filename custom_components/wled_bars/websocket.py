@@ -87,6 +87,25 @@ def ws_identify(hass, connection, msg) -> None:
         connection.send_result(msg["id"])
 
 
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/flash",
+        vol.Required("entry_id"): str,
+        vol.Optional("color", default="#ff0000"): str,
+        vol.Optional("effect", default="flash"): str,
+        vol.Optional("duration", default=3): vol.Coerce(float),
+    }
+)
+@callback
+def ws_flash(hass, connection, msg) -> None:
+    """Try a notification flash from the editor."""
+    mgr = _manager(hass, connection, msg)
+    if mgr:
+        mgr.flash(None, msg["color"], msg["effect"], msg["duration"])
+        connection.send_result(msg["id"])
+
+
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/subscribe", vol.Required("entry_id"): str}
 )
@@ -141,7 +160,7 @@ async def ws_presets_save(hass, connection, msg) -> None:
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     for command in (
-        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_subscribe,
+        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_subscribe,
         ws_presets_get, ws_presets_save,
     ):
         websocket_api.async_register_command(hass, command)

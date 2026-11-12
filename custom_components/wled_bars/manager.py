@@ -70,6 +70,26 @@ EARTH_RADIUS_M = 6371008.8
 UNIT_METRES = {"m": 1.0, "km": 1000.0, "mi": 1609.344, "ft": 0.3048, "yd": 0.9144}
 
 
+# W and kW (or Wh and kWh) can be compared with each other
+UNIT_SCALE = {"w": 1.0, "kw": 1000.0, "mw": 1e6, "wh": 1.0, "kwh": 1000.0, "mwh": 1e6}
+FLASH_EFFECTS = ("flash", "pulse", "strobe", "sparkle", "rainbow", "solid")
+
+
+def ratio_fraction(part: float, whole: float) -> float:
+    """How much of `whole` is covered by `part`, 0..1 (solar production against house use)."""
+    if whole <= 0:
+        return 1.0 if part > 0 else 0.0
+    return max(0.0, min(1.0, part / whole))
+
+
+def flash_pixels(look: dict, count: int, age: float) -> list:
+    """Pixels for a notification flash: the celebration effects plus strobe and solid."""
+    if look["effect"] == "strobe":
+        on = (age % 0.25) < 0.06
+        return [engine.hex_to_rgb(look["color"]) if on else BLACK] * count
+    return engine._celebrate(look, count, age)  # noqa: SLF001 - same looks as "finished"
+
+
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance between two points, in metres."""
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -131,6 +151,7 @@ class BarsManager:
         self._listeners: set[Callable[[dict], None]] = set()
         self._preview: tuple[dict, float, float] | None = None  # (bar, frac, expires)
         self._identify: tuple[list[int], float] | None = None  # (leds, until)
+        self._flash: tuple[list[int], dict, float, float] | None = None  # (leds, look, started, seconds)
         self._last_frame: dict[int, tuple[int, int, int]] = {}
         self._status_sig: tuple = ()
 
@@ -214,7 +235,7 @@ class BarsManager:
         ids: set[str] = set()
         for bar in self.bars:
             src = bar["source"]
-            ids.update((src["entity"], src["end_entity"], src["start_entity"]))
+            ids.update((src["entity"], src["entity2"], src["end_entity"], src["start_entity"]))
             if src["type"] == "distance":
                 ids.update((src["to_zone"], src["from_zone"]))
             ids.add(bar["visibility"]["entity"])
@@ -270,6 +291,17 @@ class BarsManager:
 
     def identify(self, leds: list[int]) -> None:
         self._identify = (leds, time.monotonic() + 3.0)
+
+    def flash(self, leds: list[int] | None, color: str, effect: str, seconds: float) -> None:
+        """Briefly take over some LEDs (all of them by default) for a notification."""
+        if leds is None:
+            leds = list(range(self.led_count))
+        leds = [i for i in leds if 0 <= i < self.led_count]
+        if not leds:
+            return
+        look = {"effect": effect if effect in FLASH_EFFECTS else "flash", "color": color}
+        self._flash = (leds, look, time.monotonic(), max(0.5, min(120.0, seconds)))
+        self._wake.set()
         self._wake.set()
 
     @callback
@@ -363,12 +395,27 @@ class BarsManager:
         st = self.hass.states.get(entity_id) if entity_id else None
         if st is None or st.state.lower() in UNAVAILABLE:
             return None
-        parsed = dt_util.parse_datetime(st.state)
+        raw = str(st.state)
+        if entity_id.startswith("calendar."):
+            # a calendar's state is on/off; its next (or current) event is in the attributes
+            raw = str(st.attributes.get("start_time") or "")
+        parsed = dt_util.parse_datetime(raw)
         if parsed is None:
-            return None
+            try:
+                parsed = datetime.fromisoformat(raw.strip())  # also a plain date: midnight
+            except ValueError:
+                return None
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
         return dt_util.as_utc(parsed)
+
+    def _scaled(self, entity_id: str) -> float | None:
+        """An entity's number, in base units when its unit is a known power or energy one."""
+        st = self.hass.states.get(entity_id) if entity_id else None
+        value = engine.num(st.state, None) if st is not None else None
+        if value is None:
+            return None
+        return value * UNIT_SCALE.get(str(st.attributes.get("unit_of_measurement") or "").strip().lower(), 1.0)
 
     def _place(self, entity_id: str) -> tuple[float, float, float] | None:
         """(latitude, longitude, radius in metres) of a zone, person or tracker."""
@@ -500,6 +547,36 @@ class BarsManager:
 
         if kind == "distance":
             return self._distance(rt)
+
+        if kind == "media":
+            st = self.hass.states.get(src["entity"]) if src["entity"] else None
+            if st is None or st.state.lower() in UNAVAILABLE:
+                return ("unavailable" if src["entity"] else "idle", 0.0, None)
+            if st.state not in ("playing", "paused"):
+                return ("idle", 0.0, None)
+            duration = engine.num(st.attributes.get("media_duration"), 0.0)
+            position = engine.num(st.attributes.get("media_position"), None)
+            if duration <= 0 or position is None:
+                return ("idle", 0.0, None)  # live radio and the like have no length
+            if st.state == "playing":
+                updated = dt_util.parse_datetime(str(st.attributes.get("media_position_updated_at") or ""))
+                if updated is not None:
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+                    position += (utc - dt_util.as_utc(updated)).total_seconds()
+                rt.total = duration
+            position = max(0.0, min(duration, position))
+            return ("active", position / duration, round(duration - position, 1))
+
+        if kind == "ratio":
+            if not src["entity"] or not src["entity2"]:
+                return ("idle", 0.0, None)
+            part = self._scaled(src["entity"])
+            whole = self._scaled(src["entity2"])
+            if part is None or whole is None:
+                return ("unavailable", 0.0, None)
+            frac = ratio_fraction(part, whole)
+            return ("active", frac, round(frac * 100.0, 1))
 
         if kind == "window":
             start_m = parse_hhmm(src["window_start"])
@@ -785,6 +862,16 @@ class BarsManager:
                 for idx in leds:
                     if 0 <= idx < self.led_count:
                         frame[idx] = (255, 255, 255) if on else BLACK
+                animated = True
+
+        if self._flash:
+            leds, look, started, seconds = self._flash
+            age = now - started
+            if age > seconds or not self.settings["enabled"]:
+                self._flash = None
+            else:
+                for idx, px in zip(leds, flash_pixels(look, len(leds), age)):
+                    frame[idx] = tuple(int(round(max(0.0, min(255.0, v * bright)))) for v in px)
                 animated = True
 
         self._last_frame = frame

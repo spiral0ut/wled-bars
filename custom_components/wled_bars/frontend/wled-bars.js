@@ -59,6 +59,9 @@ const ICONS = {
   flip: "M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4",
   undo: "M4 9h10a6 6 0 0 1 0 12H9M8 5L4 9l4 4",
   redo: "M20 9H10a6 6 0 0 0 0 12h5M16 5l4 4-4 4",
+  media: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM10 8.5l5.5 3.5-5.5 3.5z",
+  calendar: "M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM3 10h18M8 3v4M16 3v4",
+  bell: "M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2zM10 21h4",
   zoomin: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6M11 8v6",
   zoomout: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4M8 11h6",
   distance: "M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
@@ -249,6 +252,61 @@ export function distanceInfo(source, states) {
   };
 }
 
+// ---------- media, share-of and event sources (mirror manager.py) ----------
+
+const UNIT_SCALE = { w: 1, kw: 1000, mw: 1e6, wh: 1, kwh: 1000, mwh: 1e6 };
+const gone = (st) => !st || ["unavailable", "unknown", ""].includes(String(st.state).toLowerCase());
+const clockText = (sec) => {
+  const t = Math.max(0, Math.round(sec)), hrs = Math.floor(t / 3600), min = Math.floor((t % 3600) / 60);
+  return (hrs ? `${hrs}:${String(min).padStart(2, "0")}` : String(min)) + ":" + String(t % 60).padStart(2, "0");
+};
+const spanText = (sec) => {
+  const t = Math.max(0, sec), d = Math.floor(t / 86400), hrs = Math.floor((t % 86400) / 3600), min = Math.floor((t % 3600) / 60);
+  return d ? `${d} d ${hrs} h` : hrs ? `${hrs} h ${min} min` : `${min} min`;
+};
+// -> {frac, position, duration, playing} or null when nothing with a length is playing
+export function mediaInfo(source, states, now = Date.now()) {
+  const st = states[source.entity];
+  if (gone(st) || !["playing", "paused"].includes(st.state)) return null;
+  const duration = E.num(st.attributes?.media_duration, 0);
+  let position = E.num(st.attributes?.media_position, null);
+  if (duration <= 0 || position === null) return null;
+  if (st.state === "playing") {
+    const at = Date.parse(st.attributes?.media_position_updated_at || "");
+    if (!Number.isNaN(at)) position += (now - at) / 1000;
+  }
+  position = Math.max(0, Math.min(duration, position));
+  return { frac: position / duration, position, duration, playing: st.state === "playing" };
+}
+// -> {frac, part, whole, unit}: how much of the second entity the first one covers
+export function ratioInfo(source, states) {
+  const a = states[source.entity], b = states[source.entity2];
+  const part = a ? E.num(a.state, null) : null, whole = b ? E.num(b.state, null) : null;
+  if (part === null || whole === null) return null;
+  const unitA = String(a.attributes?.unit_of_measurement || ""), unitB = String(b.attributes?.unit_of_measurement || "");
+  const ka = UNIT_SCALE[unitA.trim().toLowerCase()] || 1, kb = UNIT_SCALE[unitB.trim().toLowerCase()] || 1;
+  const frac = whole * kb <= 0 ? (part > 0 ? 1 : 0) : E.clamp((part * ka) / (whole * kb));
+  return { frac, part: (part * ka) / kb, whole, unit: unitB };
+}
+const timeOf = (states, id) => {
+  const st = states[id];
+  if (gone(st)) return null;
+  const raw = String(id.startsWith("calendar.") ? st.attributes?.start_time || "" : st.state).trim();
+  // "2026-11-14 07:00:00" and plain dates are local time, like the backend reads them
+  const ms = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw + "T00:00" : raw.replace(" ", "T"));
+  return Number.isNaN(ms) ? null : ms;
+};
+// -> {end (ms), left (s), frac}: frac is null until the bar starts filling, or when the length isn't known here
+export function eventInfo(source, states, now = Date.now()) {
+  const end = timeOf(states, source.end_entity);
+  if (end === null) return null;
+  const startAt = timeOf(states, source.start_entity || "");
+  const total = startAt !== null ? (end - startAt) / 1000 : E.num(source.duration, 0);
+  const left = (end - now) / 1000;
+  const frac = total > 0 && left <= total && left >= 0 ? E.clamp(1 - left / total) : null;
+  return { end, left, total, frac };
+}
+
 // ---------- bar kinds: what each preset needs ----------
 // sources: which "follows" choices make sense; hide: add-ons that don't apply;
 // range: how the empty/full mapping is presented.
@@ -262,6 +320,9 @@ const KINDS = {
   day: { sources: ["window"], hide: ["done", "unavail", "peak", "markers"], noDrain: true },
   level: { sources: ["entity", "manual"], hide: ["done"], range: "percent", noDrain: true },
   distance: { sources: ["distance"], hide: ["peak", "markers"] },
+  media: { sources: ["media"], hide: ["done", "peak", "markers"] },
+  energy: { sources: ["ratio"], hide: ["done", "peak", "markers"], noDrain: true },
+  event: { sources: ["timestamp"], hide: ["peak", "markers"], noDrain: true },
 };
 const TEMP_PRESETS = {
   F: [["Room", 60, 85], ["Outdoor", 0, 100], ["Fridge", 33, 45], ["Freezer", -10, 20]],
@@ -278,6 +339,8 @@ const SOURCE_TYPES = [
   ["timestamp", "A finish time (washer, dryer, printer…)"],
   ["window", "The time of day"],
   ["distance", "Distance to a place"],
+  ["media", "A media player's playback position"],
+  ["ratio", "One value as a share of another"],
   ["manual", "An automation (set by a service call)"],
 ];
 const PALETTES = [
@@ -387,6 +450,40 @@ const TEMPLATES = [
       tip: { enabled: true, count: 1, effect: "pulse", period: 1.5, color: "#ffffff" },
       on_complete: { effect: "pulse", color: "#18e060", duration: 8, then: "hold" },
       smoothing: 1.5,
+    },
+  },
+  {
+    icon: "media", name: "Media playback",
+    desc: "Fills as a song, show or film plays; hides when nothing is playing.",
+    bar: {
+      name: "Now playing", kind: "media",
+      source: { type: "media" },
+      color: { mode: "gradient", span: "bar", stops: evenStops(["#ff5dc8", "#7a5cff"]) },
+      tip: { enabled: true, count: 1, effect: "solid", color: "#ffffff" },
+      smoothing: 0.5,
+    },
+  },
+  {
+    icon: "tip", name: "Solar vs. house use",
+    desc: "How much of what the house is using right now is covered by solar.",
+    bar: {
+      name: "Solar", kind: "energy",
+      source: { type: "ratio" },
+      color: { mode: "value", blend: true, stops: evenStops(["#ff2a2a", "#ffd000", "#18e060"]) },
+      tip: { enabled: false },
+      ticks: { every: 25, color: "#303030" },
+      smoothing: 2,
+    },
+  },
+  {
+    icon: "calendar", name: "Countdown to an event",
+    desc: "Bin day, a calendar event or a date: fills as it gets closer.",
+    bar: {
+      name: "Bin day", kind: "event",
+      source: { type: "timestamp", duration: 86400 },
+      color: { mode: "value", blend: true, stops: evenStops(["#18e060", "#ffd000", "#ff2a2a"]) },
+      tip: { enabled: true, count: 1, effect: "pulse", period: 2 },
+      on_complete: { effect: "flash", color: "#ff2a2a", duration: 10, then: "hide" },
     },
   },
   { icon: "blank", name: "Blank bar", desc: "Start from the defaults.", bar: { name: "New bar" } },
@@ -1106,9 +1203,11 @@ class WledBarsPanel extends HTMLElement {
     const s = bar.source;
     if (s.type === "entity") return s.entity ? `${s.entity} · ${s.min}–${s.max}` : "No entity chosen yet";
     if (s.type === "timer") return s.entity || "No timer chosen yet";
-    if (s.type === "timestamp") return s.end_entity ? `until ${s.end_entity}` : "No finish-time entity yet";
+    if (s.type === "timestamp") return s.end_entity ? `until ${s.end_entity}` : bar.kind === "event" ? "No event chosen yet" : "No finish-time entity yet";
     if (s.type === "window") return `daily ${s.window_start}–${s.window_end}`;
     if (s.type === "distance") return s.entity ? `${s.entity} → ${(s.to_zone || "zone.home").replace(/^zone\./, "")}` : "Nobody chosen yet";
+    if (s.type === "media") return s.entity ? `${s.entity} · playback` : "No media player chosen yet";
+    if (s.type === "ratio") return s.entity && s.entity2 ? `${s.entity} ÷ ${s.entity2}` : "Sensors not chosen yet";
     return "manual / automation";
   }
 
@@ -1204,7 +1303,13 @@ class WledBarsPanel extends HTMLElement {
     if (st.why === "finished") return { tone: "", text: "Hidden: finished" };
     const src = bar.source.type;
     if (src === "timer") return { tone: "", text: "Hidden: timer isn’t running" };
-    if (src === "timestamp") return { tone: "", text: "Hidden: no finish time yet" };
+    if (src === "media") return { tone: "", text: "Hidden: nothing is playing" };
+    if (src === "ratio") return { tone: "", text: "Hidden: choose both sensors" };
+    if (src === "timestamp") {
+      const ev = eventInfo(bar.source, states);
+      if (ev && ev.left > 0 && ev.total > 0) return { tone: "", text: `Hidden until ${whenText(new Date(ev.end - ev.total * 1000))}` };
+      return { tone: "", text: bar.kind === "event" ? "Hidden: no upcoming event" : "Hidden: no finish time yet" };
+    }
     if (src === "window") return { tone: "", text: `Hidden until ${bar.source.window_start}` };
     if (src === "manual") return { tone: "", text: "Hidden: waiting for an automation" };
     return { tone: "", text: "Hidden: nothing to show" };
@@ -2056,6 +2161,74 @@ class WledBarsPanel extends HTMLElement {
     ];
   }
 
+  // An info line under the fields that keeps itself up to date.
+  _liveInfo(text) {
+    const info = h("div", { class: "info" });
+    let last = null;
+    this._rangeInfo = () => { const now = text(); if (now !== last) { last = now; info.textContent = now; } };
+    return info;
+  }
+
+  _mediaFields(d) {
+    const s = d.source;
+    return [
+      this._f("Media player", this._in(s, "entity", "entity", { rerender: true, domains: ["media_player"] }), s.entity ? this._name(s.entity) : "A TV, speaker or streaming box", "full"),
+      this._liveInfo(() => {
+        if (!s.entity) return "Choose a media player. The bar fills as each song, show or film plays.";
+        const info = mediaInfo(s, this._hass?.states || {});
+        if (!info) return `${this._name(s.entity)} isn’t playing anything with a known length, so the bar hides.`;
+        return `${this._name(s.entity)} is ${info.playing ? "playing" : "paused"} at ${clockText(info.position)} of ${clockText(info.duration)}.`;
+      }),
+    ];
+  }
+
+  _ratioFields(d, energy) {
+    const s = d.source;
+    const power = (st) => ["power", "energy"].includes(st.attributes?.device_class);
+    const domains = ["sensor", "number", "input_number", "counter"];
+    return [
+      this._f(energy ? "Solar production" : "This value", this._in(s, "entity", "entity", { rerender: true, domains, prefer: energy ? power : null }),
+        s.entity ? this._name(s.entity) : energy ? "What the panels are making right now" : "The part", "full"),
+      this._f(energy ? "House use" : "As a share of", this._in(s, "entity2", "entity", { rerender: true, domains, prefer: energy ? power : null }),
+        s.entity2 ? this._name(s.entity2) : energy ? "What the house is using right now" : "The whole: a full bar", "full"),
+      this._liveInfo(() => {
+        if (!s.entity || !s.entity2) return energy ? "Choose both sensors. A full bar means solar covers everything the house is using."
+          : "Choose both sensors. The bar is full when the first value reaches the second.";
+        const info = ratioInfo(s, this._hass?.states || {});
+        if (!info) return "One of the sensors has no number right now, so the bar would hide.";
+        return `${fmt(info.part)} of ${fmt(info.whole)} ${info.unit} right now lights ${Math.round(info.frac * 100)} % of the bar.`;
+      }),
+    ];
+  }
+
+  _eventFields(d) {
+    const s = d.source;
+    const days = E.num(s.duration, 0) >= 172800 && E.num(s.duration, 0) % 86400 === 0;
+    const per = days ? 86400 : 3600;
+    const lead = h("span", { class: "rowx", style: "flex-wrap:nowrap" },
+      h("input", { type: "number", min: 1, step: 1, value: Math.max(1, Math.round(E.num(s.duration, 86400) / per)),
+        oninput: (e) => { if (e.target.value !== "") { s.duration = Math.max(1, Number(e.target.value)) * per; this._touch(false); } } }),
+      h("select", { style: "flex:none", onchange: (e) => {
+        const n = Math.max(1, Math.round(E.num(s.duration, 86400) / per));
+        s.duration = n * (e.target.value === "d" ? 86400 : 3600);
+        this._touch(true);
+      } }, h("option", { value: "h", selected: !days }, "hours before"), h("option", { value: "d", selected: days }, "days before")));
+    return [
+      this._f("Event", this._in(s, "end_entity", "entity", { rerender: true, domains: ["calendar", "sensor", "input_datetime"],
+        prefer: (st, id) => id.startsWith("calendar.") || ["timestamp", "date"].includes(st.attributes?.device_class) }),
+        s.end_entity ? this._name(s.end_entity) : "A calendar, or a sensor holding a date or time", "full"),
+      this._f("Starts filling", lead, "Hidden until then"),
+      this._liveInfo(() => {
+        if (!s.end_entity) return "Choose a calendar (its next event is used) or a date sensor, such as a bin collection day.";
+        const info = eventInfo(s, this._hass?.states || {});
+        if (!info) return `${this._name(s.end_entity)} has no upcoming event or date right now, so the bar hides.`;
+        const when = new Date(info.end).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+        if (info.left <= 0) return `The event started ${when}. The bar waits for the next one.`;
+        return `Next: ${when}, in ${spanText(info.left)}. ` + (info.frac === null ? "The bar is hidden until it starts filling." : `The bar is ${Math.round(info.frac * 100)} % full.`);
+      }),
+    ];
+  }
+
   _lengthUnit() {
     return /mi/i.test(this._hass?.config?.unit_system?.length || "") ? "mi" : "km";
   }
@@ -2065,6 +2238,19 @@ class WledBarsPanel extends HTMLElement {
     if (bar.source.type === "distance") {
       const info = distanceInfo(bar.source, this._hass?.states || {});
       return info && info.frac !== null ? { frac: info.frac, value: info.remaining, unit: ` ${info.unit}` } : null;
+    }
+    const states = this._hass?.states || {};
+    if (bar.source.type === "media") {
+      const info = mediaInfo(bar.source, states);
+      return info ? { frac: info.frac, value: Math.round(((info.duration - info.position) / 60) * 10) / 10, unit: " min left" } : null;
+    }
+    if (bar.source.type === "ratio") {
+      const info = ratioInfo(bar.source, states);
+      return info ? { frac: info.frac, value: info.part, unit: ` of ${fmt(info.whole)} ${info.unit}`.trimEnd() } : null;
+    }
+    if (bar.source.type === "timestamp") {
+      const info = eventInfo(bar.source, states);
+      return info && info.frac !== null ? { frac: info.frac, value: Math.round((info.left / 3600) * 10) / 10, unit: " h left" } : null;
     }
     const value = this._liveValue(bar);
     return value === null ? null : { frac: E.valueToFrac(bar, value), value, unit: this._liveUnit(bar) };
@@ -2315,8 +2501,11 @@ class WledBarsPanel extends HTMLElement {
         s.entity ? (this._hass?.states?.[s.entity]?.attributes?.friendly_name || (this._hass?.states?.[s.entity] ? null : "No entity with this id")) : "Type part of its name", "full"),
       needsAttr && F("Use", attrControl, "Which of this entity's numbers to show", "full"),
       s.type === "timer" && F("Timer", I(s, "entity", "entity", { domains: ["timer"], rerender: true }), null, "full"),
-      s.type === "timestamp" && F("Finish time", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "A sensor that says when it will be done", "full"),
-      s.type === "timestamp" && this._more("finish", [
+      s.type === "media" && this._mediaFields(d),
+      s.type === "ratio" && this._ratioFields(d, kindId === "energy"),
+      s.type === "timestamp" && kindId === "event" && this._eventFields(d),
+      s.type === "timestamp" && kindId !== "event" && F("Finish time", I(s, "end_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "A sensor that says when it will be done", "full"),
+      s.type === "timestamp" && kindId !== "event" && this._more("finish", [
         F("Start time", I(s, "start_entity", "entity", { domains: ["sensor", "input_datetime"], prefer: (st) => st.attributes?.device_class === "timestamp" }), "Optional sensor for when it began", "full"),
         F("Usual run time (minutes)", h("input", { type: "number", min: 0, step: 5, value: Math.round(E.num(s.duration, 0) / 60),
           oninput: (e) => { if (e.target.value !== "") { s.duration = Math.max(0, Number(e.target.value)) * 60; this._touch(false); } } }),
@@ -2583,7 +2772,11 @@ class WledBarsPanel extends HTMLElement {
           st.night.mode === "schedule" && F("From", upd(st.night, "start", "time")),
           st.night.mode === "schedule" && F("Until", upd(st.night, "end", "time")),
           st.night.mode === "entity" && F("Entity", upd(st.night, "entity", "entity", { domains: ["binary_sensor", "input_boolean", "switch", "sun", "schedule"] })),
-          st.night.mode !== "off" && F("Dim to", upd(st.night, "level", "range", { min: 1, max: 100, unit: " %" }))),
+          st.night.mode !== "off" && F("Dim to", upd(st.night, "level", "range", { min: 1, max: 100, unit: " %" })),
+          h("div", { class: "sub" }, "Notification flash"),
+          F("Try it on this strip", h("button", { class: "btn", style: "flex:none",
+            onclick: (e) => { e.preventDefault(); this.ws("flash", { entry_id: this._entry, color: "#ff3b30", effect: "pulse", duration: 3 }).catch(() => {}); } }, ic("bell", 15), "Flash for 3 s"),
+            "Automations use the wled_bars.flash action: a colour, an effect and a few seconds, on a bar, part of a strip or every strip")),
         h("div", { class: "rowx", style: "padding:0 16px 16px;justify-content:flex-end" },
           h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
           h("button", { class: "btn pri", onclick: async () => {

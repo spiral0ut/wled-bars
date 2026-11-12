@@ -51,3 +51,56 @@ set_enabled:
       required: true
       selector:
         boolean:
+flash:
+  name: Notification flash
+  description: Briefly take over a bar's LEDs, part of a strip or whole strips with a colour and effect, then hand them back. For doorbells, "washer done", "garage left open" and the like.
+  fields:
+    bar:
+      name: Bar
+      description: Flash only this bar's LEDs (name or id). Leave empty to flash a whole strip.
+      selector:
+        text:
+    device:
+      name: Device
+      description: Name of the WLED Bars device. Leave empty (with no bar) to flash every strip.
+      selector:
+        text:
+    color:
+      name: Colour
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+    effect:
+      name: Effect
+      default: flash
+      selector:
+        select:
+          options:
+            - flash
+            - pulse
+            - strobe
+            - sparkle
+            - rainbow
+            - solid
+    duration:
+      name: Seconds
+      default: 5
+      selector:
+        number:
+          min: 0.5
+          max: 120
+          step: 0.5
+          unit_of_measurement: s
+    start:
+      name: First LED
+      description: With "End", flash only this LED range of the strip.
+      selector:
+        number:
+          min: 0
+          mode: box
+    end:
+      name: Last LED
+      selector:
+        number:
+          min: 0
+          mode: box

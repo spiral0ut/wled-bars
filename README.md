@@ -4,14 +4,14 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.4.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.5.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
 | Area | Options |
 |---|---|
 | **Position** | Any LED range, either direction (drag backwards for a reversed bar). Fill from the beginning, the end, the centre outwards, or both ends inwards. |
-| **Source** | A numeric entity or attribute with min/max · a `timer.*` helper · "finishes at" timestamp sensors (washer, dryer, oven, printer ETA) · a daily time window (day progress) · manual, driven by services. Any source can be reversed to drain instead of fill. |
+| **Source** | A numeric entity or attribute with min/max · a `timer.*` helper · "finishes at" timestamp sensors (washer, dryer, oven, printer ETA) · a daily time window (day progress) · distance to a place · a media player's playback position · one value as a share of another (solar against house use) · a countdown to a calendar event or date · manual, driven by services. Any source can be reversed to drain instead of fill. |
 | **Colours** | One colour · gradient along the bar (fixed, or stretched over the lit part) · hard colour zones · whole bar recolours with the value (great for temperature) · rainbow. Unlimited colour stops, presets. |
 | **Tip** | 1–20 LEDs at the leading edge: steady, blink, smooth pulse or strobe, adjustable speed, own colour or a tint of the bar, on the last lit LEDs or just ahead, optional comet fade. |
 | **Begin / end markers** | Always-on LEDs at each end showing where the bar starts and stops, with their own colour, brightness and effect. |
@@ -47,7 +47,11 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Order:** drag a bar card by its grip to reorder. Where bars share LEDs, the one further down the list is drawn on top.
 - **Preset defaults:** the *Preset defaults* button (top of the bar list) chooses which add-ons each preset starts with. It applies to every strip and only affects new bars.
 - **Distance to a place:** fills as a person, a device tracker or a distance sensor gets closer to a zone (home by default). The length of the bar is a set distance, the distance between two zones you pick (for example work to home), or wherever the trip starts.
-- **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
+- **Media playback:** fills as a song, show or film plays on a media player and hides when nothing with a known length is playing.
+- **Solar vs. house use:** pick the solar production sensor and the house consumption sensor; a full bar means solar covers everything the house is using. W and kW can be mixed. The same source ("one value as a share of another") works for any two numbers.
+- **Countdown to an event:** pick a calendar (its next event is used) or a sensor holding a date or time, such as a bin collection day, and how many hours or days before it the bar starts filling.
+- **Notification flash:** the `wled_bars.flash` action briefly takes over a bar's LEDs, part of a strip or whole strips, then hands them back. *Device settings* has a button to try it.
+- **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, distance, media playback, solar vs. house use, event countdown, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
 - **Dashboard card:** add the *WLED Bars* card for a live view (`type: custom:wled-bars-card`, optional `title`, `entry_id` or `device`, `show_bars: false`).
@@ -83,8 +87,22 @@ Entities follow the bar: they are created when a bar is added, renamed with it (
 | `wled_bars.stop_timer` | `bar` | Stop it |
 | `wled_bars.set_value` | `bar`, `value` | Set a *manual* bar's value (in its min/max units) |
 | `wled_bars.set_enabled` | `bar`, `enabled` | Turn one bar on or off |
+| `wled_bars.flash` | optional `bar` or `device`, `color`, `effect`, `duration`, `start`, `end` | Notification flash; see below |
 
 `bar` is the bar's name (or id).
+
+#### Notification flash
+
+```yaml
+action: wled_bars.flash
+data:
+  color: [255, 0, 0]     # or "#ff0000"
+  effect: pulse          # flash, pulse, strobe, sparkle, rainbow or solid
+  duration: 5            # seconds, up to 120
+  bar: Print progress    # optional: only this bar's LEDs
+```
+
+Leave out `bar` to flash a whole strip: `device: Desk strip` picks one, and with neither every strip flashes. `start` and `end` limit it to an LED range. The flash is drawn over whatever the bars are showing and follows the strip's brightness and night dimming; it does nothing while the device's **Bars** switch is off.
 
 ## How it compares
 

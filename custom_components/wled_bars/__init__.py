@@ -19,13 +19,15 @@ from .const import (
     DOMAIN,
     PANEL_ELEMENT,
     PANEL_URL_PATH,
+    SERVICE_FLASH,
     SERVICE_SET_ENABLED,
     SERVICE_SET_VALUE,
     SERVICE_START_TIMER,
     SERVICE_STOP_TIMER,
     STATIC_URL,
 )
-from .manager import BarsManager
+from . import engine
+from .manager import FLASH_EFFECTS, BarsManager
 from .websocket import async_register_websocket
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,6 +102,50 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
                 bar["enabled"] = call.data["enabled"]
         await mgr.async_save(bars, None)
 
+    async def flash(call: ServiceCall) -> None:
+        data = call.data
+        color = data.get("color", "#ff0000")
+        if not isinstance(color, str):
+            color = "#" + "".join(f"{max(0, min(255, int(c))):02x}" for c in list(color)[:3])
+        seconds = float(data.get("duration", 5))
+        effect = data.get("effect", "flash")
+        if data.get("bar"):
+            # just this bar's LEDs
+            mgr, rt = _find(hass, data["bar"])
+            targets = [(mgr, engine.bar_leds(rt.bar))]
+        else:
+            wanted = str(data.get("device") or "").strip().lower()
+            mgrs = [
+                m for m in managers(hass).values()
+                if not wanted or wanted in (m.entry.entry_id.lower(), m.entry.title.strip().lower())
+            ]
+            if not mgrs:
+                raise ServiceValidationError(f"No WLED Bars device named '{data.get('device')}'")
+            leds = None
+            if "start" in data or "end" in data:
+                lo, hi = sorted((int(data.get("start", 0)), int(data.get("end", data.get("start", 0)))))
+                leds = list(range(lo, hi + 1))
+            targets = [(m, leds) for m in mgrs]
+        for mgr, leds in targets:
+            mgr.flash(leds, color, effect, seconds)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FLASH,
+        flash,
+        vol.Schema(
+            {
+                vol.Optional("bar"): cv.string,
+                vol.Optional("device"): cv.string,
+                vol.Optional("color"): vol.Any(cv.string, [vol.Coerce(int)]),
+                vol.Optional("effect"): vol.In(FLASH_EFFECTS),
+                vol.Optional("duration"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=120)),
+                vol.Optional("start"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+                vol.Optional("end"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+            }
+        ),
+    )
+
     bar = {vol.Required("bar"): cv.string}
     hass.services.async_register(
         DOMAIN,
@@ -140,5 +186,5 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}").async_remove()
     if not hass.config_entries.async_entries(DOMAIN) and hass.data.pop(_SHARED, None):
         frontend.async_remove_panel(hass, PANEL_URL_PATH)
-        for service in (SERVICE_START_TIMER, SERVICE_STOP_TIMER, SERVICE_SET_VALUE, SERVICE_SET_ENABLED):
+        for service in (SERVICE_START_TIMER, SERVICE_STOP_TIMER, SERVICE_SET_VALUE, SERVICE_SET_ENABLED, SERVICE_FLASH):
             hass.services.async_remove(DOMAIN, service)

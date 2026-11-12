@@ -49,6 +49,7 @@ DEFAULT_BAR = {
     "source": {
         "type": "entity",
         "entity": "",
+        "entity2": "",
         "attribute": "",
         "min": 0,
         "max": 100,
