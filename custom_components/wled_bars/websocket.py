@@ -16,6 +16,13 @@ def _manager(hass, connection, msg):
     return mgr
 
 
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/version"})
+@callback
+def ws_version(hass, connection, msg) -> None:
+    """The running version, so a page can tell when it was loaded from an older one."""
+    connection.send_result(msg["id"], {"version": hass.data.get(f"{DOMAIN}_version")})
+
+
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/devices"})
 @callback
 def ws_devices(hass, connection, msg) -> None:
@@ -194,7 +201,7 @@ async def ws_presets_save(hass, connection, msg) -> None:
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
     for command in (
-        ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_control, ws_subscribe,
+        ws_version, ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_control, ws_subscribe,
         ws_presets_get, ws_presets_save,
     ):
         websocket_api.async_register_command(hass, command)

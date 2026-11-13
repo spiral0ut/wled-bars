@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.7.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.7.1).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -109,6 +109,8 @@ data:
 Leave out `bar` to flash a whole strip: `device: Desk strip` picks one, and with neither every strip flashes. `start` and `end` limit it to an LED range. The flash is drawn over whatever the bars are showing and follows the strip's brightness and night dimming; it does nothing while the device's **Bars** switch is off.
 
 ## Dashboard card
+
+After an update, the card and the editor tell you if the browser is still running the previous version (or Home Assistant has not been restarted yet) instead of quietly showing the old one.
 
 Add the **WLED Bars** card from the dashboard's card picker. It shows the strip as it is right now, and one row per bar with its colour, what it is doing in plain words (*Showing*, *Hidden until 22:00*, *Switched off*…) and how full it is. Point at a row to mark that bar's LEDs on the strip; a hidden bar is sketched faintly in its place.
 

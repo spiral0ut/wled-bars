@@ -11,7 +11,7 @@
      Serve the repository root (python3 -m http.server) and open /demo/. -->
 <script type="module">
 import * as E from "../custom_components/wled_bars/frontend/engine.js";
-import { conditionsOk, distanceInfo, mediaInfo, ratioInfo, eventInfo } from "../custom_components/wled_bars/frontend/wled-bars.js";
+import { conditionsOk, distanceInfo, mediaInfo, ratioInfo, eventInfo } from "../custom_components/wled_bars/frontend/wled-bars.js?v=demo";
 
 // ?leds=165 tries a long strip, ?theme=light a light Home Assistant theme
 const query = new URLSearchParams(location.search);
@@ -120,6 +120,11 @@ const hass = {
   config: { unit_system: { temperature: "°F", length: "mi" } },
   async callWS(msg) {
     const type = msg.type.split("/")[1];
+    if (type === "version") {
+      // ?stale=reload / ?stale=restart show the notices for an out-of-date page
+      if (query.get("stale") === "restart") throw { code: "unknown_command" };
+      return { version: query.get("stale") === "reload" ? "9.9.9" : "demo" };
+    }
     if (type === "devices") return [device];
     if (type === "presets_get") return presets;
     if (type === "presets_save") { presets = msg.presets; return presets; }

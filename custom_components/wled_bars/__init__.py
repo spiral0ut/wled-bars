@@ -55,7 +55,8 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
         return
     hass.data[_SHARED] = True
 
-    version = (await async_get_integration(hass, DOMAIN)).version or "0"
+    version = str((await async_get_integration(hass, DOMAIN)).version or "0")
+    hass.data[f"{DOMAIN}_version"] = version  # lets a browser notice it is running an older copy
     frontend_dir = str(Path(__file__).parent / "frontend")
     if not hass.data.get(f"{_SHARED}_static"):  # survives removing the last device
         hass.data[f"{_SHARED}_static"] = True

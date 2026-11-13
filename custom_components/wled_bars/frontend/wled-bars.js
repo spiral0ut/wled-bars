@@ -7,6 +7,48 @@ const E = await import("./engine.js" + new URL(import.meta.url).search);
 
 const DOMAIN = "wled_bars";
 
+// ---------- is this page running the installed version? ----------
+// After an update a browser can keep an old copy of this file, and the files
+// can be newer than a Home Assistant that has not restarted yet. Either way
+// the card and editor would quietly be the wrong ones, so they say so instead.
+
+const VERSION = new URL(import.meta.url).searchParams.get("v");
+let versionCheck = null;
+
+export function staleCheck(hass) {
+  versionCheck = versionCheck || hass.callWS({ type: `${DOMAIN}/version` }).then(
+    (res) => (VERSION && res?.version && res.version !== VERSION ? { kind: "reload", version: res.version } : null),
+    // a backend without this command is older than this file: it has not restarted since the update
+    (err) => (err?.code === "unknown_command" ? { kind: "restart" } : null));
+  return versionCheck;
+}
+
+function staleNotice(stale) {
+  if (!stale) return null;
+  if (stale.kind === "restart") {
+    return h("div", { class: "stale" }, h("span", {}, "WLED Bars was updated. Restart Home Assistant to finish; until then some things here may not work."));
+  }
+  const key = `wled_bars_reloaded_${stale.version}`;
+  let tried = false;
+  try { tried = sessionStorage.getItem(key) === "1"; } catch (_e) { /* private mode */ }
+  const text = tried
+    ? `This browser is holding on to WLED Bars ${VERSION}; ${stale.version} is installed. Clear the cached files for this site, or hard-refresh (Ctrl/Cmd + Shift + R).`
+    : `WLED Bars ${stale.version} is installed, but this page is still running ${VERSION}.`;
+  return h("div", { class: "stale" }, h("span", {}, text),
+    h("button", { onclick: async () => {
+      try { sessionStorage.setItem(key, "1"); } catch (_e) { /* ignore */ }
+      // drop what the browser and Home Assistant's own offline cache kept, then load afresh
+      try { for (const name of await caches.keys()) await caches.delete(name); } catch (_e) { /* not available */ }
+      location.reload();
+    } }, tried ? "Try again" : "Reload"));
+}
+const STALE_CSS = `.stale{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13px;line-height:1.35;padding:9px 12px;border-radius:10px;
+  background:color-mix(in srgb,var(--wb-warn) 14%,transparent);border:1px solid color-mix(in srgb,var(--wb-warn) 45%,transparent)}
+.stale span{flex:1;min-width:180px}
+.stale button{font:inherit;color:inherit;background:transparent;border:1px solid color-mix(in srgb,currentColor 40%,transparent);border-radius:8px;padding:5px 12px;cursor:pointer;white-space:nowrap}
+.stale button:hover{border-color:var(--wb-accent)}
+`;
+
 // ---------- tiny DOM helpers ----------
 
 const h = (tag, props, ...kids) => {
@@ -1153,6 +1195,7 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _load() {
+    this._stale = await staleCheck(this._hass);
     try { this._presets = (await this.ws("presets_get")) || {}; } catch (_e) { this._presets = {}; }
     try {
       this._devices = await this.ws("devices");
@@ -1213,7 +1256,7 @@ class WledBarsPanel extends HTMLElement {
     const root = this.shadowRoot;
     root.innerHTML = "";
     this._strips = [];
-    root.append(h("style", {}, CSS));
+    root.append(h("style", {}, CSS + STALE_CSS));
     const top = h("div", { class: "top" });
     if (customElements.get("ha-menu-button")) {
       const menu = document.createElement("ha-menu-button");
@@ -1242,6 +1285,8 @@ class WledBarsPanel extends HTMLElement {
     root.append(wrap);
     if (this._toastEl) root.append(this._toastEl);
     this._tlNow = [];
+    const stale = staleNotice(this._stale);
+    if (stale) wrap.append(stale);
     if (!this._device) {
       wrap.append(
         h("div", { class: "card empty" },
@@ -2841,6 +2886,7 @@ class WledBarsPanel extends HTMLElement {
             dlg.close();
             this._render();
           } }, "Save")),
+        VERSION && h("div", { class: "dim sm", style: "padding:0 16px 12px;text-align:right" }, `WLED Bars ${VERSION}`),
         this._lists
       );
     };
@@ -3101,8 +3147,11 @@ class WledBarsCard extends HTMLElement {
     const root = this.shadowRoot;
     root.innerHTML = "";
     const body = (this._body = h("div", { class: "body" }));
-    root.append(h("style", {}, CARD_CSS), h("ha-card", {}, body));
+    root.append(h("style", {}, CARD_CSS + STALE_CSS), h("ha-card", {}, body));
     try {
+      this._stale = await staleCheck(this._hass);
+      if (run !== this._run) return;
+      if (this._stale) body.append(staleNotice(this._stale));
       const devices = await this._hass.callWS({ type: `${DOMAIN}/devices` });
       if (run !== this._run) return;
       const c = this._config;
@@ -3145,6 +3194,7 @@ class WledBarsCard extends HTMLElement {
     });
     body.innerHTML = "";
     if (this._ro) this._ro.disconnect();
+    if (this._stale) body.append(staleNotice(this._stale));
 
     // header: name, one-line summary, master switch
     this._sumEl = h("span", { class: "sum" });
