@@ -628,6 +628,25 @@ async def main():
     fill = added["sensor"][0]
     assert fill.native_value == 50 and fill.extra_state_attributes["showing"] is True, (fill.native_value, fill.extra_state_attributes)
     assert any(sig.startswith("wled_bars_status") for sig in SENT), "status changes must be signalled"
+    # what the bar looks like, for other displays: place, colour and a short text
+    attrs = fill.extra_state_attributes
+    assert (attrs["first_led"], attrs["last_led"], attrs["text"]) == (0, 9, "50 %"), attrs
+    assert attrs["color"].startswith("#") and len(attrs["color"]) == 7 and attrs["color"] != "#000000", attrs
+    showing = sensor_mod.StripShowing(mgr)
+    assert showing.native_value == f"Alpha|0|9|50|{attrs['color'][1:]}", showing.native_value
+    listed = showing.extra_state_attributes
+    assert listed["count"] == 1 and listed["bars"][0]["id"] == "a" and listed["bars"][0]["text"] == "50 %", listed
+    # a unit other than percent is shown as the value itself
+    hass.states.set("sensor.outdoor", 41, {"unit_of_measurement": "°F"})
+    await settle(mgr, fake)
+    assert fill.extra_state_attributes["text"] == "41 °F", fill.extra_state_attributes
+    hass.states.set("sensor.outdoor", 41)
+    # time left reads like a clock would say it, and the line never outgrows a text sensor
+    assert [manager_mod.duration_text(x) for x in (3, 59, 60, 3599, 3600, 17940, 90000, 86400 * 3)] == [
+        "5 s", "60 s", "1 min", "59 min", "1 h", "4 h 59 min", "1 d 1 h", "3 d"]
+    many = [{"name": f"A rather long bar name {i}|;", "start": i * 10, "end": i * 10 + 9, "percent": 100, "color": "ff8800"} for i in range(20)]
+    line = manager_mod.showing_text(many)
+    assert len(line) <= 255 and line.startswith("A rath|0|9|100|ff8800;") and "||" not in line, line
     # the switch turns its bar off, and the bar stops showing
     await added["switch"][0].async_turn_off()
     assert added["switch"][0].is_on is False and mgr.bars[0]["enabled"] is False

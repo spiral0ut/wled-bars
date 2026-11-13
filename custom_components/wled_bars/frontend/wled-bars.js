@@ -109,6 +109,8 @@ const ICONS = {
   distance: "M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
   x: "M6 6l12 12M18 6L6 18",
   grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  upload: "M12 15V4M7 9l5-5 5 5M5 20h14",
 };
 const ic = (name, size = 16) => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -123,6 +125,63 @@ const ic = (name, size = 16) => {
   return svg;
 };
 const fmt = (v) => (Math.round(v * 100) / 100).toString();
+
+// ---------- taking bars from one strip to another ----------
+
+// A name nothing in `taken` uses yet: "Timer", then "Timer 2", "Timer 3"…
+export function freeName(name, taken) {
+  const used = new Set(taken.map((n) => String(n).trim().toLowerCase()));
+  const base = String(name || "").trim() || "Bar";
+  if (!used.has(base.toLowerCase())) return base;
+  const stem = base.replace(/ \d+$/, "");
+  for (let n = 2; ; n++) if (!used.has(`${stem} ${n}`.toLowerCase())) return `${stem} ${n}`;
+}
+
+// Where LEDs start → end of a strip `from` long go on a strip `to` long.
+// They stay put when they fit; otherwise (or when `scale` says so) they keep their share of the strip.
+export function fitRange(start, end, from, to, scale) {
+  const lo = Math.min(start, end), hi = Math.max(start, end);
+  if (!(to > 0) || (!scale && hi < to)) return [start, end];
+  const k = to / Math.max(from || 0, hi + 1);
+  const a = Math.min(to - 1, Math.floor(lo * k));
+  const b = Math.min(to - 1, Math.max(a, Math.ceil((hi + 1) * k) - 1));
+  return start <= end ? [a, b] : [b, a];
+}
+
+// Bars from another strip (or a file), made ready to join `existing` on a strip `to` LEDs long:
+// placed so they fit, with names and ids that don't clash.
+export function adoptBars(incoming, existing, from, to) {
+  const scale = to > 0 && incoming.some((b) => Math.max(b.start, b.end) >= to);
+  const names = existing.map((b) => b.name);
+  const ids = new Set(existing.map((b) => b.id));
+  return incoming.map((raw) => {
+    const bar = E.normalizeBar(clone(raw));
+    [bar.start, bar.end] = fitRange(bar.start, bar.end, from, to, scale);
+    bar.name = freeName(bar.name, names);
+    names.push(bar.name);
+    if (!bar.id || ids.has(bar.id)) bar.id = "";
+    else ids.add(bar.id);
+    return bar;
+  });
+}
+
+// What a chosen file holds, or null when it isn't a WLED Bars export.
+export function readExport(text) {
+  let data;
+  try { data = JSON.parse(text); } catch (_e) { return null; }
+  if (Array.isArray(data)) data = { bars: data };
+  if (!data || typeof data !== "object" || !Array.isArray(data.bars)) return null;
+  const bars = data.bars.filter((b) => b && typeof b === "object" && !Array.isArray(b) && b.source !== null);
+  if (!bars.length || bars.length !== data.bars.length) return null;
+  const dev = data.device && typeof data.device === "object" ? data.device : {};
+  return {
+    bars: bars.map((b) => E.normalizeBar(b)),
+    settings: data.settings && typeof data.settings === "object" && !Array.isArray(data.settings) ? data.settings : null,
+    name: typeof dev.name === "string" ? dev.name : "",
+    led_count: Number(dev.led_count) || 0,
+    exported: typeof data.exported === "string" && !Number.isNaN(Date.parse(data.exported)) ? new Date(data.exported) : null,
+  };
+}
 const hexToPixels = (hex) => {
   const out = [];
   for (let i = 0; i + 5 < hex.length; i += 6) {
@@ -969,6 +1028,7 @@ input.sw:checked{background:var(--wb-accent)} input.sw:checked::after{left:18px}
 .tpl button:hover{border-color:var(--wb-accent);background:var(--wb-tint);transform:translateY(-1px)} .tpl .ic{display:flex;color:var(--wb-accent);margin-bottom:4px}
 .editor{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
 .namerow{gap:12px}
+.namenote{display:flex;align-items:flex-start;gap:6px;margin-top:-6px} .namenote.warn{color:var(--wb-warn)} .namenote .i{flex:none;margin-top:2px}
 .namerow input[type=text]{font-size:16px;font-weight:600;min-width:150px;flex:1 1 150px;padding:8px 10px}
 .sticky{position:sticky;top:60px;z-index:4;background:var(--wb-card);border:1px solid var(--wb-line);border-radius:var(--wb-r);padding:12px;
   box-shadow:0 8px 24px rgba(0,0,0,.25);transition:padding var(--wb-t)}
@@ -1221,6 +1281,7 @@ class WledBarsPanel extends HTMLElement {
     this._view = "list";
     this._render();
     this._subscribe();
+    if (this._devices.length > 1) this._loadOthers();
   }
 
   async _subscribe() {
@@ -1383,6 +1444,7 @@ class WledBarsPanel extends HTMLElement {
       h("div", { class: "rowx" },
         h("button", { class: "btn pri", onclick: () => this._edit(i) }, "Edit"),
         h("button", { class: "btn xs", onclick: () => this._duplicate(i) }, "Duplicate"),
+        this._devices.length > 1 && h("button", { class: "btn xs", title: "Put a copy of this bar on another strip", onclick: () => this._copyDialog(i) }, "Copy to…"),
         h("button", { class: "btn xs danger", onclick: () => this._delete(i) }, "Delete"),
         h("span", { class: "grow" }),
         h("input", { type: "checkbox", class: "sw", title: "Enabled", checked: !!bar.enabled,
@@ -1636,10 +1698,176 @@ class WledBarsPanel extends HTMLElement {
     const bars = clone(this._bars);
     const copy = clone(bars[i]);
     copy.id = "";
-    copy.name += " copy";
+    copy.name = freeName(copy.name, bars.map((b) => b.name));
     bars.splice(i + 1, 0, copy);
     await this._saveBars(bars);
     this._render();
+  }
+
+  // ----- copy to another strip, save to a file, load from a file -----
+
+  _copyDialog(i) {
+    const bar = this._bars[i];
+    const others = this._devices.filter((d) => d.entry_id !== this._entry);
+    let target = others[0];
+    let busy = false;
+    const dlg = h("dialog");
+    const draw = () => {
+      dlg.innerHTML = "";
+      const [a, b] = fitRange(bar.start, bar.end, this._device.led_count, target.led_count);
+      const moved = a !== bar.start || b !== bar.end;
+      dlg.append(
+        h("div", { style: "padding:16px 16px 4px" },
+          h("h2", { style: "margin:0 0 4px" }, `Copy “${bar.name}” to another strip`),
+          h("div", { class: "dim sm" }, "The copy starts out the same and is then its own bar. The one here stays as it is.")),
+        h("div", { class: "chips", style: "padding:10px 16px 4px" }, others.map((d) =>
+          h("button", { class: "chip" + (d === target ? " sel" : ""), style: "padding:5px 12px", onclick: () => { target = d; draw(); } },
+            d.name, h("span", { class: "dim" }, `${d.led_count} LEDs`)))),
+        h("div", { class: "sm", style: "padding:8px 16px 14px" },
+          moved ? `${target.name} is ${target.led_count} LEDs long, so the copy is fitted to LED ${a} → ${b}. You can move it afterwards.`
+            : `It keeps its place: LED ${a} → ${b}.`),
+        h("div", { class: "rowx", style: "padding:0 16px 16px;justify-content:flex-end" },
+          h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
+          h("button", { class: "btn pri", onclick: async () => {
+            if (busy) return;
+            busy = true;
+            try {
+              const there = await this.ws("get", { entry_id: target.entry_id });
+              const [copy] = adoptBars([{ ...bar, id: "" }], there.bars, this._device.led_count, there.device.led_count);
+              await this.ws("save", { entry_id: target.entry_id, bars: there.bars.concat(copy) });
+              dlg.close();
+              this._loadOthers();
+              this._toast(`Copied “${bar.name}” to ${target.name}` + (copy.name !== bar.name ? ` as “${copy.name}”` : ""),
+                async () => { await this.ws("save", { entry_id: target.entry_id, bars: there.bars }); this._loadOthers(); });
+            } catch (err) {
+              dlg.close();
+              this._toast(`Couldn’t copy to ${target.name}: ${err?.message || err}`);
+            }
+          } }, "Copy")));
+    };
+    dlg.addEventListener("close", () => dlg.remove());
+    this.shadowRoot.append(dlg);
+    draw();
+    dlg.showModal();
+  }
+
+  _export() {
+    const dev = this._device;
+    const data = { wled_bars: 1, version: VERSION, exported: new Date().toISOString(),
+      device: { name: dev.name, led_count: dev.led_count }, settings: this._settings, bars: this._bars };
+    const slug = dev.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "strip";
+    const day = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+    const link = h("a", { href: url, download: `wled-bars-${slug}-${day}.json`, style: "display:none" });
+    this.shadowRoot.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  // Ask for a file, then show what is in it before anything changes.
+  _import() {
+    const input = h("input", { type: "file", accept: ".json,application/json", style: "display:none", onchange: async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      let found = null;
+      try { found = readExport(await file.text()); } catch (_e) { /* unreadable */ }
+      if (found) this._importDialog(found, file.name);
+      else this._toast(`“${file.name}” isn’t a file saved from WLED Bars`);
+    } });
+    this.shadowRoot.append(input);
+    input.click();
+  }
+
+  _importDialog(file, filename) {
+    const here = this._device;
+    let mode = this._bars.length ? "add" : "replace";
+    let withSettings = false;
+    let busy = false;
+    const refit = here.led_count > 0 && file.bars.some((b) => Math.max(b.start, b.end) >= here.led_count);
+    const n = file.bars.length;
+    const from = [file.name && `“${file.name}”`, file.led_count && `${file.led_count} LEDs`, file.exported && `saved ${file.exported.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`]
+      .filter(Boolean).join(" · ");
+    const dlg = h("dialog");
+    const draw = () => {
+      dlg.innerHTML = "";
+      const seg = (val, label) => h("button", { class: mode === val ? "on" : "", onclick: () => { mode = val; draw(); } }, label);
+      dlg.append(
+        h("div", { style: "padding:16px 16px 4px" },
+          h("h2", { style: "margin:0 0 4px" }, "Load bars from a file"),
+          h("div", { class: "dim sm" }, from || filename)),
+        h("div", { class: "sm", style: "padding:10px 16px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+          h("b", {}, `${n} bar${n === 1 ? "" : "s"}: `), file.bars.map((b) => b.name).join(", ")),
+        this._bars.length > 0 && h("div", { style: "padding:12px 16px 0" }, h("span", { class: "seg" }, seg("add", "Add to the bars here"), seg("replace", "Replace the bars here"))),
+        h("div", { class: "dim sm", style: "padding:8px 16px 0" },
+          [mode === "replace" && this._bars.length ? `The ${this._bars.length === 1 ? "bar" : `${this._bars.length} bars`} on ${here.name} will be removed.` : "",
+            refit ? `${here.name} is ${here.led_count} LEDs long, so the bars are fitted to its length.` : ""].filter(Boolean).join(" ")),
+        file.settings && h("label", { class: "rowx sm", style: "padding:10px 16px 0;flex-wrap:nowrap;align-items:flex-start" },
+          h("input", { type: "checkbox", checked: withSettings, onchange: (e) => { withSettings = e.target.checked; } }),
+          h("span", {}, "Also load the device settings", h("div", { class: "dim" }, "Brightness, night dimming and how frames are sent. The WLED segment stays as it is."))),
+        h("div", { class: "rowx", style: "padding:14px 16px 16px;justify-content:flex-end" },
+          h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
+          h("button", { class: "btn pri", onclick: async () => {
+            if (busy) return;
+            busy = true;
+            const before = { bars: clone(this._bars), settings: clone(this._settings) };
+            const keep = mode === "add" ? this._bars : [];
+            const bars = keep.concat(adoptBars(file.bars, keep, file.led_count, here.led_count));
+            const msg = { entry_id: this._entry, bars };
+            if (withSettings) msg.settings = { ...file.settings, segment: this._settings.segment };
+            const apply = async (m) => {
+              const res = await this.ws("save", m);
+              this._bars = res.bars;
+              this._settings = res.settings;
+              this._render();
+            };
+            try {
+              await apply(msg);
+              dlg.close();
+              this._toast(`Loaded ${n} bar${n === 1 ? "" : "s"} from the file`, () => apply({ entry_id: this._entry, ...before }));
+            } catch (err) {
+              dlg.close();
+              this._toast(`Couldn’t load the file: ${err?.message || err}`);
+            }
+          } }, mode === "replace" && this._bars.length ? "Replace" : "Load")));
+    };
+    dlg.addEventListener("close", () => dlg.remove());
+    this.shadowRoot.append(dlg);
+    draw();
+    dlg.showModal();
+  }
+
+  // Bar names on the other strips, to warn about names an automation could not tell apart.
+  async _loadOthers() {
+    const others = {};
+    for (const d of this._devices) {
+      if (d.entry_id === this._entry) continue;
+      try { others[d.name] = (await this.ws("get", { entry_id: d.entry_id })).bars.map((b) => b.name); } catch (_e) { /* skip */ }
+    }
+    this._others = others;
+    this._syncNameNote();
+  }
+
+  _syncNameNote() {
+    const el = this._nameNote;
+    const d = this._draft;
+    if (!el || !d || this._view !== "edit") return;
+    const same = (n) => String(n).trim().toLowerCase() === d.name.trim().toLowerCase();
+    let text = "", warn = false;
+    if (d.name.trim()) {
+      if (this._bars.some((b, k) => k !== this._draftIndex && same(b.name))) {
+        warn = true;
+        text = `Another bar on this strip is already called “${d.name.trim()}”. Automations that use the name can’t tell them apart.`;
+      } else if (d.source.type === "manual") {
+        // only bars that automations drive by name need to hear about other strips
+        const where = Object.entries(this._others || {}).filter(([, names]) => names.some(same)).map(([strip]) => strip);
+        if (where.length) text = `${where.join(" and ")} also ${where.length > 1 ? "have" : "has"} a bar with this name. Automations then need “device” to say which strip.`;
+      }
+    }
+    el.style.display = text ? "" : "none";
+    el.className = "namenote sm" + (warn ? " warn" : " dim");
+    el.replaceChildren(...(text ? [warn ? ic("rules", 14) : "", text] : []));
   }
 
   // Two-step button: the first click arms it, the second confirms. Avoids
@@ -1716,7 +1944,8 @@ class WledBarsPanel extends HTMLElement {
     this._simExtra = h("div", { class: "sim simx", style: "margin-top:6px" }, this._liveBtn, this._doneBtn, this._unavBtn);
     this._simRange.title = "Drag to simulate a value";
     this._draftOrig = JSON.stringify(E.normalizeBar(d));
-    this._nameInput = h("input", { type: "text", value: d.name, placeholder: "Bar name", oninput: (e) => { this._draft.name = e.target.value; } });
+    this._nameInput = h("input", { type: "text", value: d.name, placeholder: "Bar name", oninput: (e) => { this._draft.name = e.target.value; this._syncNameNote(); } });
+    this._nameNote = h("div", { style: "display:none" });
     this._enabledInput = h("input", { type: "checkbox", class: "sw", checked: !!d.enabled,
       onchange: (e) => { this._draft.enabled = e.target.checked; this._pushStrip(); } });
     const nameRow = h("div", { class: "rowx namerow" }, this._nameInput,
@@ -1733,8 +1962,9 @@ class WledBarsPanel extends HTMLElement {
     this._io.observe(sentinel);
     this._form = h("div", { class: "editor" });
     this._lists = h("div", { style: "display:none" });
-    wrap.append(nameRow, sentinel, head, this._form, this._lists);
+    wrap.append(nameRow, this._nameNote, sentinel, head, this._form, this._lists);
     this._renderForm();
+    this._syncNameNote();
     this._syncSimButtons();
     // undo history starts after the first draw, which may fill in defaults
     this._hist = [this._snap()];
@@ -1771,6 +2001,7 @@ class WledBarsPanel extends HTMLElement {
     this._histSeen = snap;
     this._scale = null;
     if (this._nameInput) this._nameInput.value = v.d.name;
+    this._syncNameNote();
     if (this._enabledInput) this._enabledInput.checked = !!v.d.enabled;
     this._renderForm();
     this._syncSimButtons();
@@ -1854,7 +2085,7 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _touch(structural) {
-    if (structural) { this._renderForm(); this._syncSimButtons(); }
+    if (structural) { this._renderForm(); this._syncSimButtons(); this._syncNameNote(); }
     else for (const fn of this._hooks) fn();
     this._pushStrip();
   }
@@ -2877,7 +3108,12 @@ class WledBarsPanel extends HTMLElement {
           h("div", { class: "sub" }, "Notification flash"),
           F("Try it on this strip", h("button", { class: "btn", style: "flex:none",
             onclick: (e) => { e.preventDefault(); this.ws("flash", { entry_id: this._entry, color: "#ff3b30", effect: "pulse", duration: 3 }).catch(() => {}); } }, ic("bell", 15), "Flash for 3 s"),
-            "Automations use the wled_bars.flash action: a colour, an effect and a few seconds, on a bar, part of a strip or every strip")),
+            "Automations use the wled_bars.flash action: a colour, an effect and a few seconds, on a bar, part of a strip or every strip"),
+          h("div", { class: "sub" }, "Backup"),
+          F("This strip’s bars and settings", h("span", { class: "rowx", style: "flex:none" },
+            h("button", { class: "btn", onclick: (e) => { e.preventDefault(); this._export(); } }, ic("download", 15), "Save to a file"),
+            h("button", { class: "btn", onclick: (e) => { e.preventDefault(); dlg.close(); this._import(); } }, ic("upload", 15), "Load a file…")),
+            "A file can be loaded again here, or on another strip")),
         h("div", { class: "rowx", style: "padding:0 16px 16px;justify-content:flex-end" },
           h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
           h("button", { class: "btn pri", onclick: async () => {

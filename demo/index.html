@@ -15,7 +15,7 @@ import { conditionsOk, distanceInfo, mediaInfo, ratioInfo, eventInfo } from "../
 
 // ?leds=165 tries a long strip, ?theme=light a light Home Assistant theme
 const query = new URLSearchParams(location.search);
-const LEDS = Number(query.get("leds")) || 60;
+let LEDS = Number(query.get("leds")) || 60;
 const states = {
   "sensor.printer_progress": { state: "0", attributes: { friendly_name: "Printer progress", unit_of_measurement: "%" } },
   "sensor.living_room_temperature": { state: "71.4", attributes: { friendly_name: "Living room temperature", unit_of_measurement: "°F", device_class: "temperature" } },
@@ -52,8 +52,29 @@ let preview = null;
 let flash = null; // {color, effect, until, t0}
 let presets = {};
 let rev = 1; // goes up on every save, like the real integration
-const device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
+let device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
   segments: [{ id: 0, start: 0, stop: LEDS, name: "" }] };
+// a second, shorter strip to copy bars to; the globals above always hold the strip being looked at
+const stores = {
+  demo: null,
+  shelf: {
+    device: { entry_id: "shelf", name: "Shelf strip (demo)", host: "192.168.1.51", led_count: 30, online: true, segments: [{ id: 0, start: 0, stop: 30, name: "" }] },
+    bars: [{ id: "s1", name: "Temperature", start: 0, end: 14, kind: "temperature", source: { entity: "sensor.living_room_temperature", min: 60, max: 85 } }].map(E.normalizeBar),
+    settings: { ...settings },
+  },
+};
+let current = "demo";
+const store = (id) => (id === current ? { device, bars, settings } : stores[id]);
+const use = (id) => {
+  if (id === current || !stores[id]) return;
+  stores[current] = { device, bars, settings };
+  ({ device, bars, settings } = stores[id]);
+  stores[id] = null;
+  current = id;
+  LEDS = device.led_count;
+  rev++;
+};
+const tidy = (list) => list.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
 const listeners = new Set();
 const shown = {};
 const fullSince = {};
@@ -125,12 +146,18 @@ const hass = {
       if (query.get("stale") === "restart") throw { code: "unknown_command" };
       return { version: query.get("stale") === "reload" ? "9.9.9" : "demo" };
     }
-    if (type === "devices") return [device];
+    if (type === "devices") return ["demo", "shelf"].map((id) => store(id).device);
     if (type === "presets_get") return presets;
     if (type === "presets_save") { presets = msg.presets; return presets; }
-    if (type === "get") return { device, bars, settings };
+    if (type === "get") return JSON.parse(JSON.stringify(store(msg.entry_id)));
     if (type === "save") {
-      if (msg.bars) bars = msg.bars.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
+      if (msg.entry_id !== current) {
+        const other = stores[msg.entry_id];
+        if (msg.bars) other.bars = tidy(msg.bars);
+        if (msg.settings) other.settings = msg.settings;
+        return { bars: other.bars, settings: other.settings };
+      }
+      if (msg.bars) bars = tidy(msg.bars);
       if (msg.settings) settings = msg.settings;
       rev++;
       return { bars, settings };
@@ -147,7 +174,7 @@ const hass = {
     return null;
   },
   connection: {
-    async subscribeMessage(cb) { listeners.add(cb); return () => listeners.delete(cb); },
+    async subscribeMessage(cb, msg) { use(msg.entry_id); listeners.add(cb); return () => listeners.delete(cb); },
   },
 };
 // ?card shows dashboard cards instead of the editor

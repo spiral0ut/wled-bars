@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.7.1).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.8.0).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
 
 ## What a bar can do
 
@@ -56,6 +56,9 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 - **Create a bar:** pick a template (print progress, temperature gauge, battery, countdown, finishes-at, day progress, level meter, distance, media playback, solar vs. house use, event countdown, blank), then drag across the strip to place it. Afterwards drag the middle to move it or either white end to resize; only *Flip direction* changes which way it fills.
 - **Preview:** the bar at the top of the editor is drawn by the same engine that drives the LEDs. Drag *Simulate*, press *Play*, or use *Test completion* / *Unavailable*.
 - **Show on strip:** mirrors the draft onto the real LEDs while you edit. *Flash these LEDs* blinks the chosen range so you can find it on the wall.
+- **Copy to another strip:** with more than one strip, each bar card has *Copy to…*. The copy keeps its LEDs when they fit on the other strip and is otherwise fitted to that strip's length; if the name is taken there it gets a number.
+- **Save and load:** *Device settings → Backup* saves a strip's bars and settings to a file and loads one again, on the same strip or another. Loading shows what is in the file first, adds to or replaces the bars there, and can be undone straight afterwards.
+- **Names:** the editor says so when two bars on a strip share a name, because automations that use the name could not tell them apart.
 - **Dashboard card:** add the *WLED Bars* card to any dashboard (see [Dashboard card](#dashboard-card)).
 
 ### Two ways of sending frames (Device settings)
@@ -71,13 +74,15 @@ With JSON, LED numbers count from the start of the chosen WLED segment; use a se
 
 ### Entities
 
-Each WLED device gets a **Bars** switch and a **Bars brightness** number. Each bar also gets:
+Each WLED device gets a **Bars** switch, a **Bars brightness** number and a **Showing** sensor. Each bar also gets:
 
 | Entity | What it is |
 |---|---|
 | `switch.<device>_bars_<bar>` | Turns that bar on or off |
-| `sensor.<device>_bars_<bar>_fill` | How full the bar is, in whole percent (unknown while it has nothing to show); attributes `showing`, `status`, `value` |
+| `sensor.<device>_bars_<bar>_fill` | How full the bar is, in whole percent (unknown while it has nothing to show); attributes `showing`, `status`, `value`, `text` ("64 %", "72.4 °F", "2 h 5 min left", "in 3 d"), `color` (what it looks like on the strip now), `first_led`, `last_led` |
 | `number.<device>_bars_<bar>_value` | For bars driven by an automation: sets the bar's value |
+
+The **Showing** sensor (`sensor.<device>_bars_showing`) describes what is on the strip right now, for other displays. Its state is one compact line an ESPHome text sensor can read, one entry per visible bar: `name|first LED|last LED|percent|colour`, joined with `;`, for example `Print|0|27|64|00c8ff;Temp|59|32|47|ffd000`. It stays within 255 characters by shortening names and, if it must, leaving out the last bars. The `bars` attribute holds the same bars as a list (with `id` and `text`) for dashboards and templates.
 
 Entities follow the bar: they are created when a bar is added, renamed with it (the entity id stays the same) and removed when it is deleted.
 
@@ -180,4 +185,4 @@ Then open `http://localhost:8765/demo/` to try the editor without Home Assistant
 
 ## Not done yet
 
-- 2D matrix layouts, import/export, translations other than English.
+- 2D matrix layouts, translations other than English.

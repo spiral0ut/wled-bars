@@ -5,6 +5,7 @@ import asyncio
 import copy
 import logging
 import math
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -108,6 +109,46 @@ def distance_fraction(remaining: float, total: float) -> float:
     return engine.clamp(1.0 - remaining / total)
 
 
+def duration_text(seconds: float) -> str:
+    """A length of time the way a small display would show it: "4 h 59 min"."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{max(5, int(math.ceil(seconds / 5.0)) * 5)} s"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h" if hours else f"{days} d"
+
+
+def number_text(value: float) -> str:
+    return ("%.1f" % value).rstrip("0").rstrip(".")
+
+
+SHOWING_MAX = 255  # Home Assistant states and ESPHome text sensors both stop here
+
+
+def showing_text(rows: list[dict]) -> str:
+    """One line for small displays: name|first LED|last LED|percent|colour;…
+
+    Names are shortened, and bars at the end left out, to stay inside the limit.
+    """
+    for name_len in (16, 10, 6):
+        parts = []
+        for row in rows:
+            name = re.sub(r"[|;]", " ", str(row["name"])).strip()[:name_len].strip()
+            parts.append(f"{name}|{row['start']}|{row['end']}|{row['percent']}|{row['color'] or ''}")
+        text = ";".join(parts)
+        if len(text) <= SHOWING_MAX:
+            return text
+    while parts and len(";".join(parts)) > SHOWING_MAX:
+        parts.pop()
+    return ";".join(parts)
+
+
 class BarLookupError(LookupError):
     """A service named a bar that does not exist, or a name several bars share."""
 
@@ -156,6 +197,8 @@ class BarRuntime:
         self.easing = False
         self.total: float | None = None  # length in seconds of a running time-based source
         self.starts_in: float | None = None  # seconds until a time-based source has something to show
+        self.color: str | None = None  # the bar's colour on the strip right now, "rrggbb"
+        self.color_peak = 0
         self.status: dict = {}
 
 
@@ -727,11 +770,14 @@ class BarsManager:
             "percent": round(frac * 100.0, 1),
             "value": value,
             "visible": False,
+            "text": self._display_text(rt, state, raw, frac, value),
         }
 
         def hidden(why: str) -> None:
             # "why" lets the editor explain a hidden bar in plain words
             rt.status["why"] = why
+            rt.color = None
+            rt.color_peak = 0
             rt.shown = None
             rt.easing = False
             return None
@@ -829,6 +875,46 @@ class BarsManager:
             "peak": peak,
             "complete_age": age,
         }
+
+    def _display_text(self, rt: BarRuntime, state: str, raw: float, frac: float, value) -> str | None:
+        """What a display would write next to the bar: "64 %", "2 h 5 min left", "in 3 d"."""
+        if state == "unavailable":
+            return "Unavailable"
+        if state != "active":
+            return f"in {duration_text(rt.starts_in)}" if rt.starts_in else None
+        src = rt.bar["source"]
+        kind = src["type"]
+        if kind in ("timer", "timestamp", "media") or (kind == "manual" and rt.timer is not None):
+            if value is not None:
+                return f"{duration_text(value)} left"
+        elif kind == "window" and rt.total:
+            return f"{duration_text(rt.total * (1.0 - raw))} left"
+        elif kind == "entity" and value is not None and not src["attribute"]:
+            st = self.hass.states.get(src["entity"])
+            unit = str(getattr(st, "attributes", {}).get("unit_of_measurement") or "").strip()
+            if unit and unit != "%":
+                return f"{number_text(value)} {unit}"
+        return f"{round(frac * 100.0)} %"
+
+    def showing(self) -> list[dict]:
+        """The bars on the strip right now, in drawing order."""
+        rows = []
+        for rt in self.runtimes:
+            status = rt.status
+            if not status.get("visible"):
+                continue
+            rows.append(
+                {
+                    "id": rt.bar["id"],
+                    "name": rt.bar["name"],
+                    "start": rt.bar["start"],
+                    "end": rt.bar["end"],
+                    "percent": round(status.get("percent") or 0.0),
+                    "color": status.get("color"),
+                    "text": status.get("text"),
+                }
+            )
+        return rows
 
     def _conditions_ok(self, vis: dict, utc: datetime) -> bool:
         """Evaluate the bar's "show only when" conditions (all or any of them)."""
@@ -973,11 +1059,12 @@ class BarsManager:
         if preview and now > preview[2]:
             preview = self._preview = None
 
-        def paint(bar: dict, ctx: dict) -> None:
+        def paint(bar: dict, ctx: dict) -> list:
             pixels = engine.render_bar(bar, ctx)
             for idx, px in zip(engine.bar_leds(bar), pixels):
                 if 0 <= idx < self.led_count:
                     frame[idx] = px
+            return pixels
 
         for rt in self.runtimes:
             ctx = self._evaluate(rt, now, utc, bright)
@@ -985,7 +1072,7 @@ class BarsManager:
                 continue  # the draft being edited replaces the saved bar
             if ctx is None:
                 continue
-            paint(rt.bar, ctx)
+            rt.status["color"] = self._bar_color(rt, paint(rt.bar, ctx))
             if rt.easing or engine.is_animated(rt.bar):
                 animated = True
             if rt.total:
@@ -1042,7 +1129,13 @@ class BarsManager:
             self._sent = {k: (-1, -1, -1) for k in self._sent}
         # tell the per-bar entities when something they show has changed
         signature = tuple(
-            (rt.bar["id"], rt.status.get("state"), round(rt.status.get("percent") or 0.0), rt.status.get("visible"))
+            (
+                rt.bar["id"],
+                rt.status.get("state"),
+                round(rt.status.get("percent") or 0.0),
+                rt.status.get("visible"),
+                rt.status.get("text"),
+            )
             for rt in self.runtimes
         )
         if signature != self._status_sig:
@@ -1067,6 +1160,20 @@ class BarsManager:
             # time-based bars creep forward; DDP also needs a keep-alive
             return max(step, 1.0 / self._fps())
         return HEALTH_INTERVAL
+
+    @staticmethod
+    def _bar_color(rt: BarRuntime, pixels: list) -> str | None:
+        """The bar's colour at full strength: its brightest LED, ignoring the dark half of a blink."""
+        best = max(pixels, key=max, default=None)
+        level = max(best) if best else 0
+        if level <= 0:
+            return rt.color
+        if level < rt.color_peak * 0.6:
+            rt.color_peak *= 0.9  # a dimmer frame: wait and see whether it stays dim
+            return rt.color
+        rt.color_peak = level
+        rt.color = "%02x%02x%02x" % tuple(min(255, int(round(v * 255.0 / level))) for v in best[:3])
+        return rt.color
 
     def _notify(self) -> None:
         if not self._listeners:
