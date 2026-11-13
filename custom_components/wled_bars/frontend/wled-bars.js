@@ -714,8 +714,8 @@ function applyTone(host, hass) {
   }
   return false;
 }
-const STRIP_DARK = { off: "#1d212b", num: "#7c869d", tick: "#3a4152", label: "#aab3c5", mid: "rgba(255,255,255,.35)", first: "#3dff8b", last: "#ff5d5d", handle: "#ffffff", mark: "#c9d1e3" };
-const STRIP_LIGHT = { off: "rgba(0,0,0,.09)", num: "#6b7486", tick: "rgba(0,0,0,.25)", label: "#566079", mid: "rgba(0,0,0,.3)", first: "#12a150", last: "#e5484d", handle: "#30384a", mark: "#566079" };
+const STRIP_DARK = { off: "#1d212b", num: "#7c869d", tick: "#3a4152", label: "#aab3c5", mid: "rgba(255,255,255,.4)", band: "rgba(255,255,255,.07)", gap: "rgba(0,0,0,.55)", first: "#3dff8b", last: "#ff5d5d", handle: "#ffffff", mark: "#c9d1e3" };
+const STRIP_LIGHT = { off: "rgba(0,0,0,.09)", num: "#6b7486", tick: "rgba(0,0,0,.25)", label: "#566079", mid: "rgba(0,0,0,.35)", band: "rgba(0,0,0,.05)", gap: "rgba(255,255,255,.8)", first: "#12a150", last: "#e5484d", handle: "#30384a", mark: "#566079" };
 
 class StripView {
   constructor(canvas, opts = {}) {
@@ -876,6 +876,25 @@ class StripView {
     }
     const disp = (v) => Math.round(255 * Math.pow(v / 255, 0.5));
 
+    // the selection as a band behind its LEDs: [x, y, width, height] for each row it is on
+    const band = [];
+    if (this.sel) {
+      const lo = Math.min(this.sel.start, this.sel.end), hi = Math.min(L.n - 1, Math.max(this.sel.start, this.sel.end));
+      const half = Math.min(L.size / 2, rad + 3.5);
+      for (let a = lo; a <= hi; a = (Math.floor(a / L.perRow) + 1) * L.perRow) {
+        const b = Math.min(hi, (Math.floor(a / L.perRow) + 1) * L.perRow - 1);
+        const [x0, y] = pos(a), [x1] = pos(b);
+        band.push([x0 - L.size / 2 + 1, y - half, x1 - x0 + L.size - 2, half * 2]);
+      }
+      g.fillStyle = P.band;
+      for (const [x, y, w, hh] of band) {
+        g.beginPath();
+        if (g.roundRect) g.roundRect(x, y, w, hh, hh / 2);
+        else g.rect(x, y, w, hh);
+        g.fill();
+      }
+    }
+
     for (let i = 0; i < L.n; i++) {
       const [x, y] = pos(i);
       const p = this.pixels[i] || [0, 0, 0];
@@ -927,27 +946,30 @@ class StripView {
     }
 
     if (this.sel) {
-      const lo = Math.min(this.sel.start, this.sel.end), hi = Math.max(this.sel.start, this.sel.end);
+      // one outline around the whole selection (one piece per row), so nothing overlaps however small the LEDs are
       g.lineWidth = 1.5;
-      for (let i = lo; i <= hi && i < L.n; i++) {
-        const [x, y] = pos(i);
-        g.strokeStyle = i === this.sel.start ? P.first : i === this.sel.end ? P.last : P.mid;
+      g.strokeStyle = P.mid;
+      for (const [x, y, w, hh] of band) {
         g.beginPath();
-        g.arc(x, y, rad + 2.5, 0, Math.PI * 2);
+        if (g.roundRect) g.roundRect(x, y, w, hh, hh / 2);
+        else g.rect(x, y, w, hh);
         g.stroke();
       }
-      if (this.o.onSelect) {
-        // grab handles on the two outer edges
-        g.fillStyle = P.handle;
-        for (const [i, side] of [[lo, -1], [hi, 1]]) {
-          if (i >= L.n) continue;
-          const [x, y] = pos(i);
-          const hx = x + side * (L.size / 2 - 1.5) - 2.5;
-          g.beginPath();
-          if (g.roundRect) g.roundRect(hx, y - L.size / 2 - 1, 5, L.size + 2, 2.5);
-          else g.rect(hx, y - L.size / 2 - 1, 5, L.size + 2);
-          g.fill();
-        }
+      // the two ends: green where the bar begins, red where it is full; in the picker they are the grab handles
+      const lo = Math.min(this.sel.start, this.sel.end), hi = Math.max(this.sel.start, this.sel.end);
+      for (const [i, side] of [[lo, -1], [hi, 1]]) {
+        if (i >= L.n) continue;
+        const [x, y] = pos(i);
+        const first = lo === hi ? side === -1 : i === this.sel.start;
+        const hx = x + side * (L.size / 2 - 1.5) - 2.5;
+        g.fillStyle = first ? P.first : P.last;
+        g.strokeStyle = P.gap;
+        g.lineWidth = 1;
+        g.beginPath();
+        if (g.roundRect) g.roundRect(hx, y - L.size / 2 - 1, 5, L.size + 2, 2.5);
+        else g.rect(hx, y - L.size / 2 - 1, 5, L.size + 2);
+        g.fill();
+        g.stroke();
       }
     }
   }
@@ -2734,7 +2756,7 @@ class WledBarsPanel extends HTMLElement {
       posInfo.textContent = `LED ${d.start} → ${d.end} · ${hi - lo + 1} LEDs · fills from the green end towards the red end`
         + (over.length ? ` · shares LEDs with ${over.join(", ")}` : "");
     });
-    form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either white end to resize", [
+    form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either end to resize", [
       h("div", { class: "stage full" }, scroller), posInfo,
       F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
       F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 })),
