@@ -1,9 +1,12 @@
 // WLED Bars frontend: the sidebar editor panel and the dashboard card.
 // Plain web components, no build step. The preview uses the same render
 // engine as the backend (engine.js mirrors engine.py).
-// Loaded with the same ?v= as this file so a new release never pairs with a
-// cached copy of the old engine.
-const E = await import("./engine.js" + new URL(import.meta.url).search);
+// Load matching frontend modules when Home Assistant switches release versions.
+const revision = new URL(import.meta.url).search;
+const [E, { layoutStripLabels }] = await Promise.all([
+  import("./engine.js" + revision),
+  import("./strip-labels.js" + revision),
+]);
 
 const DOMAIN = "wled_bars";
 
@@ -717,6 +720,67 @@ function applyTone(host, hass) {
 const STRIP_DARK = { off: "#1d212b", num: "#7c869d", tick: "#3a4152", label: "#aab3c5", mid: "rgba(255,255,255,.4)", band: "rgba(255,255,255,.07)", gap: "rgba(0,0,0,.55)", first: "#3dff8b", last: "#ff5d5d", handle: "#ffffff", mark: "#c9d1e3" };
 const STRIP_LIGHT = { off: "rgba(0,0,0,.09)", num: "#6b7486", tick: "rgba(0,0,0,.25)", label: "#566079", mid: "rgba(0,0,0,.35)", band: "rgba(0,0,0,.05)", gap: "rgba(255,255,255,.8)", first: "#12a150", last: "#e5484d", handle: "#30384a", mark: "#566079" };
 
+// The overview's labels are native buttons. Their rows determine where the canvas draws each line of LEDs.
+class StripLabels {
+  constructor(ranges, edit) {
+    this.ranges = ranges;
+    this.edit = edit;
+    this.el = h("div", { class: "strip-labels", role: "group", "aria-label": "Bars on this strip" });
+    this.touch = window.matchMedia("(pointer: coarse)");
+  }
+
+  layout(base) {
+    const minTarget = this.touch.matches ? 44 : 24;
+    if (this.cached?.w === base.w && this.cached.n === base.n && this.minTarget === minTarget) return this.cached;
+    this.minTarget = minTarget;
+    const active = this.el.getRootNode().activeElement;
+    const focusedId = this.el.contains(active) ? active.dataset.barId : null;
+    const texts = this.ranges.map(bar => h("span", { class: "strip-name" },
+      bar.label + "  ", h("span", { class: "strip-bounds" }, `${bar.start} → ${bar.end}`)));
+    const measure = h("div", { class: "strip-measure", "aria-hidden": "true" }, texts);
+    this.el.append(measure);
+    const ranges = this.ranges.map((bar, i) => ({
+      ...bar, text: texts[i], labelWidth: Math.ceil(texts[i].getBoundingClientRect().width),
+    }));
+    measure.remove();
+
+    const rows = layoutStripLabels(base, ranges, minTarget).map(lanes => {
+      const row = h("div", { class: "strip-label-row", style: `padding-top:${base.top + base.size}px` });
+      lanes.forEach((parts, i) => {
+        for (const part of parts) row.append(this.button(part, i));
+      });
+      return row;
+    });
+    this.el.replaceChildren(...rows);
+    this.cached = { ...base, rowTops: rows.map(row => row.offsetTop), height: this.el.offsetHeight };
+    if (focusedId) {
+      const buttons = this.el.querySelectorAll("button");
+      Array.from(buttons).find(button => button.tabIndex === 0 && button.dataset.barId === focusedId)?.focus({ preventScroll: true });
+    }
+    return this.cached;
+  }
+
+  button(part, lane) {
+    const { range, left, right, lineLeft, lineRight } = part;
+    const line = h("span", { class: "strip-line", style: `left:${lineLeft - left}px;width:${lineRight - lineLeft}px` });
+    if (range.start !== range.end && range.end >= part.first && range.end <= part.last) {
+      line.classList.add(range.start < range.end ? "right" : "left");
+    }
+    const button = h("button", {
+      type: "button", class: "strip-range", tabIndex: part.named ? 0 : -1, "data-bar-id": range.id,
+      "aria-label": `Edit ${range.label}, LEDs ${range.start} to ${range.end}`,
+      style: `grid-row:${lane + 1};margin-left:${left}px;width:${right - left}px;--range-color:${range.color}`,
+      onclick: () => this.edit(range.id),
+    }, line);
+    if (part.named) {
+      range.text.style.marginLeft = (part.labelLeft - left) + "px";
+      range.text.style.width = part.labelWidth + "px";
+      button.append(range.text);
+    }
+    return button;
+  }
+}
+
 class StripView {
   constructor(canvas, opts = {}) {
     this.c = canvas;
@@ -821,19 +885,22 @@ class StripView {
       size = w / perRow;
     }
     const rows = Math.ceil(n / perRow);
-    return { w, n, size, perRow, rows, top, rowH: top + size + extra, x0: (w - size * Math.min(n, perRow)) / 2 };
+    const base = { w, n, size, perRow, rows, top, rowH: top + size + extra, x0: (w - size * Math.min(n, perRow)) / 2 };
+    return this.o.annotations ? this.o.annotations.layout(base) : base;
   }
 
   ledAt(e, clampToStrip = false) {
     const L = this.layout();
     const r = this.c.getBoundingClientRect();
     let col = Math.floor((e.clientX - r.left - L.x0) / L.size);
-    let row = Math.floor((e.clientY - r.top) / L.rowH);
+    const y = e.clientY - r.top;
+    let row = L.rowTops ? L.rowTops.findIndex(top => y >= top && y < top + L.top + L.size) : Math.floor(y / L.rowH);
     if (clampToStrip) {
       col = Math.max(0, Math.min(L.perRow - 1, col));
       row = Math.max(0, Math.min(L.rows - 1, row));
     } else if (col < 0 || col >= L.perRow || row < 0 || row >= L.rows) return null;
-    return Math.min(L.n - 1, row * L.perRow + col);
+    const led = row * L.perRow + col;
+    return L.rowTops && led >= L.n ? null : Math.min(L.n - 1, led);
   }
 
   get light() {
@@ -848,7 +915,7 @@ class StripView {
     if (this.c.style.width !== wide) this.c.style.width = wide;
     const L = this.layout();
     const dpr = window.devicePixelRatio || 1;
-    const hCss = L.rows * L.rowH;
+    const hCss = L.height ?? L.rows * L.rowH;
     if (this.c.width !== Math.round(L.w * dpr) || this.c.height !== Math.round(hCss * dpr)) {
       this.c.width = Math.round(L.w * dpr);
       this.c.height = Math.round(hCss * dpr);
@@ -857,7 +924,10 @@ class StripView {
     const g = this.c.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, L.w, hCss);
-    const pos = (i) => [L.x0 + (i % L.perRow) * L.size + L.size / 2, Math.floor(i / L.perRow) * L.rowH + L.top + L.size / 2];
+    const pos = (i) => {
+      const row = Math.floor(i / L.perRow);
+      return [L.x0 + (i % L.perRow + 0.5) * L.size, (L.rowTops?.[row] ?? row * L.rowH) + L.top + L.size / 2];
+    };
     const rad = L.size * 0.34;
     if (this.o.ruler) {
       // LED numbers, as often as they fit
@@ -1005,6 +1075,24 @@ const CSS = `
 :host([light]) .stage{box-shadow:inset 0 0 0 1px var(--wb-line)}
 :host([light]) .scroller{scrollbar-color:rgba(0,0,0,.25) transparent}
 .stage canvas{display:block;width:100%}
+.strip-overview,.strip-labels{position:relative}
+.strip-overview > canvas{position:absolute;top:0;left:0}
+.strip-labels{pointer-events:none;font:12px/16px system-ui,sans-serif}
+.strip-label-row{display:grid;grid-template-columns:minmax(0,1fr);padding-bottom:6px}
+.strip-range{grid-column:1;justify-self:start;align-self:start;position:relative;display:block;pointer-events:auto;
+  min-width:0;min-height:28px;padding:9px 0 3px;border:0;border-radius:4px;background:transparent;color:var(--wb-text);
+  font:inherit;text-align:left;cursor:pointer}
+.strip-range:focus-visible{background:color-mix(in srgb,var(--range-color) 12%,transparent)}
+@media(hover:hover){.strip-range:hover{background:color-mix(in srgb,var(--range-color) 12%,transparent)}}
+@media(pointer:coarse){.strip-range{min-height:44px}}
+.strip-line{position:absolute;top:3px;height:3px;border-radius:2px;background:var(--range-color)}
+.strip-line.left::before,.strip-line.right::after{content:"";position:absolute;top:-2px;border-block:3.5px solid transparent}
+.strip-line.left::before{left:0;border-right:5px solid var(--range-color)}
+.strip-line.right::after{right:0;border-left:5px solid var(--range-color)}
+.strip-name{display:block;white-space:normal;overflow-wrap:anywhere}
+.strip-bounds{white-space:nowrap;color:var(--wb-dim)}
+.strip-measure{position:absolute;inset:0;overflow:hidden;visibility:hidden}
+.strip-measure .strip-name{width:max-content}
 .scroller{overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#3a4152 transparent;padding-bottom:4px}
 button,select,input{font:inherit;color:inherit}
 button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--wb-accent);outline-offset:2px}
@@ -1387,12 +1475,16 @@ class WledBarsPanel extends HTMLElement {
   _renderList(wrap) {
     const dev = this._device;
     const canvas = h("canvas");
-    this._liveStrip = new StripView(canvas, { labels: true, ruler: true, max: 22, onClick: (led) => {
+    const ranges = this._bars.map((bar, i) => ({ id: bar.id, start: bar.start, end: bar.end, label: bar.name, color: this._barColor(i) }));
+    const annotations = new StripLabels(ranges, id => {
+      const index = this._bars.findIndex(bar => bar.id === id);
+      if (index >= 0) this._edit(index);
+    });
+    this._liveStrip = new StripView(canvas, { annotations, ruler: true, max: 22, onClick: (led) => {
       for (let k = this._bars.length - 1; k >= 0; k--) if (E.barLeds(this._bars[k]).includes(led)) return this._edit(k);
       return null;
     } });
     this._liveStrip.pixels = new Array(dev.led_count).fill([0, 0, 0]);
-    this._liveStrip.ranges = this._bars.map((b, i) => ({ start: b.start, end: b.end, label: b.name, color: this._barColor(i) }));
     this._strips.push(this._liveStrip);
     this._offlineEl = h("div", { class: "banner sm", style: "display:none;margin-top:10px" },
       `Can't reach WLED at ${dev.host}. Bars will resume automatically when it is back.`);
@@ -1403,7 +1495,7 @@ class WledBarsPanel extends HTMLElement {
           h("label", { class: "rowx sm" }, "All bars",
             h("input", { type: "checkbox", class: "sw", checked: !!this._settings.enabled,
               onchange: (e) => this._saveSettings({ ...this._settings, enabled: e.target.checked }) }))),
-        h("div", { class: "stage" }, canvas),
+        h("div", { class: "stage" }, h("div", { class: "strip-overview" }, canvas, annotations.el)),
         this._offlineEl)
     );
 
