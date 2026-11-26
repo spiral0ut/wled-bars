@@ -44,11 +44,7 @@ class BarSwitch(BarEntity, SwitchEntity):
         return bool(bar and bar["enabled"])
 
     async def _enable(self, enabled: bool) -> None:
-        bars = [dict(b) for b in self.manager.bars]
-        for bar in bars:
-            if bar["id"] == self.bar_id:
-                bar["enabled"] = enabled
-        await self.manager.async_save(bars, None)
+        await self.manager.async_control(bar_id=self.bar_id, enabled=enabled)
 
     async def async_turn_on(self, **kwargs) -> None:
         await self._enable(True)

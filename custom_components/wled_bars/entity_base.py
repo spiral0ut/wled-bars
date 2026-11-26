@@ -42,7 +42,7 @@ class BarsEntity(Entity):
         self.async_write_ha_state()
 
     async def _set(self, key: str, value) -> None:
-        await self.manager.async_save(None, {**self.manager.settings, key: value})
+        await self.manager.async_control({key: value})
 
 
 class BarEntity(BarsEntity):

@@ -7,6 +7,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
+from .manager import ConfigConflict
 
 
 def _manager(hass, connection, msg):
@@ -38,9 +39,7 @@ def ws_devices(hass, connection, msg) -> None:
 def ws_get(hass, connection, msg) -> None:
     mgr = _manager(hass, connection, msg)
     if mgr:
-        connection.send_result(
-            msg["id"], {"device": mgr.describe(), "bars": mgr.bars, "settings": mgr.settings}
-        )
+        connection.send_result(msg["id"], mgr.configuration())
 
 
 @websocket_api.require_admin
@@ -48,6 +47,7 @@ def ws_get(hass, connection, msg) -> None:
     {
         vol.Required("type"): f"{DOMAIN}/save",
         vol.Required("entry_id"): str,
+        vol.Required("expected_rev"): int,
         vol.Optional("bars"): [dict],
         vol.Optional("settings"): dict,
     }
@@ -56,8 +56,14 @@ def ws_get(hass, connection, msg) -> None:
 async def ws_save(hass, connection, msg) -> None:
     mgr = _manager(hass, connection, msg)
     if mgr:
-        await mgr.async_save(msg.get("bars"), msg.get("settings"))
-        connection.send_result(msg["id"], {"bars": mgr.bars, "settings": mgr.settings})
+        try:
+            await mgr.async_save(msg.get("bars"), msg.get("settings"), msg["expected_rev"])
+        except ConfigConflict as err:
+            connection.send_error(msg["id"], "config_conflict", str(err))
+        except ValueError as err:
+            connection.send_error(msg["id"], "invalid_config", str(err))
+        else:
+            connection.send_result(msg["id"], mgr.configuration())
 
 
 @websocket_api.require_admin
@@ -129,21 +135,9 @@ async def ws_control(hass, connection, msg) -> None:
     mgr = _manager(hass, connection, msg)
     if not mgr:
         return
-    settings = None
-    if "enabled" in msg or "brightness" in msg:
-        settings = dict(mgr.settings)
-        if "enabled" in msg:
-            settings["enabled"] = msg["enabled"]
-        if "brightness" in msg:
-            settings["brightness"] = msg["brightness"]
-    bars = None
-    if "bar" in msg and "bar_enabled" in msg:
-        bars = [dict(b) for b in mgr.bars]
-        for bar in bars:
-            if bar["id"] == msg["bar"]:
-                bar["enabled"] = msg["bar_enabled"]
-    if bars is not None or settings is not None:
-        await mgr.async_save(bars, settings)
+    settings = {key: msg[key] for key in ("enabled", "brightness") if key in msg}
+    if settings or ("bar" in msg and "bar_enabled" in msg):
+        await mgr.async_control(settings, msg.get("bar"), msg.get("bar_enabled"))
     connection.send_result(msg["id"])
 
 
@@ -193,8 +187,8 @@ async def ws_presets_get(hass, connection, msg) -> None:
 @websocket_api.async_response
 async def ws_presets_save(hass, connection, msg) -> None:
     cache = await _presets(hass)
+    await cache["store"].async_save(msg["presets"])
     cache["data"] = msg["presets"]
-    await cache["store"].async_save(cache["data"])
     connection.send_result(msg["id"], cache["data"])
 
 

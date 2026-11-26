@@ -50,3 +50,11 @@ test("long edge labels wrap inside the view and partial rows stop at the last LE
   assert.deepEqual([part.left, part.right, part.labelLeft, part.labelWidth], [0, 300, 0, 300]);
   assert.deepEqual(layoutStripLabels(layout, [], 44), [[], [], []]);
 });
+
+test("a chain of overlaps follows card order in the editor and the overview", () => {
+  const ranges = [[0, 5], [4, 15], [13, 25], [60, 70]].map(([start, end]) => ({ start, end, labelWidth: 30 }));
+  for (const target of [0, 24, 44]) {
+    const [lanes] = layoutStripLabels(desktop, ranges, target);
+    assert.deepEqual(lanes.map(lane => lane.map(p => p.range.start)), [[0, 60], [4], [13]]);
+  }
+});

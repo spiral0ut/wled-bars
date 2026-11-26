@@ -178,6 +178,10 @@ def resolve_bar(managers: list, key: str, device: str | None = None):
     return found[0]
 
 
+class ConfigConflict(ValueError):
+    """The strip changed after the editor read it."""
+
+
 class BarRuntime:
     """Live state of one bar that is not part of its saved configuration."""
 
@@ -189,6 +193,7 @@ class BarRuntime:
         self.peak_at = 0.0
         self.was_full: bool | None = None
         self.complete_since: float | None = None
+        self.helper_finished: float | None = None
         self.timer: tuple[datetime, float] | None = None  # (started, seconds)
         self.manual_value: float | None = None
         self.auto_start: tuple[str, datetime] | None = None  # (end state, first seen)
@@ -212,8 +217,14 @@ class BarsManager:
         self.bars: list[dict] = []
         self.settings: dict = copy.deepcopy(DEFAULT_SETTINGS)
         self.runtimes: list[BarRuntime] = []
-        self.led_count = 30
+        self._strip_count: int | None = None
+        self._rev = time.time_ns() // 1000  # distinguish sessions after a reload
+        self._save_lock = asyncio.Lock()
+        self._owned_segment: int | None = None
+        self._output_transport = None
+        self._unsub_timers: Callable | None = None
         self.segments: list[dict] = []
+        self._segments_known = False
         self.name = entry.title
         self.online = False
         self._last_uptime: int | None = None
@@ -256,52 +267,113 @@ class BarsManager:
         if self._unsub_states:
             self._unsub_states()
             self._unsub_states = None
-        await self._give_back()
+        if self._unsub_timers:
+            self._unsub_timers()
+            self._unsub_timers = None
+        try:
+            await self._give_back()
+        except WledError as err:
+            _LOGGER.warning("Could not release WLED segment on %s: %s", self.host, err)
         self.client.close()
 
     async def _give_back(self) -> None:
-        """Hand any LEDs we painted back to WLED (best effort)."""
-        if self._sent:
-            try:
-                await self.client.release(int(self.settings["segment"]))
-            except WledError:
-                pass
+        """Only forget a frozen segment after WLED acknowledges its release."""
+        if self._owned_segment is not None:
+            await self.client.release(self._owned_segment)
+            self._owned_segment = None
         self._sent = {}
         self._active = False
 
     # ---------- configuration ----------
 
-    def _apply(self, bars: list, settings: dict) -> None:
-        old = {rt.bar["id"]: rt for rt in self.runtimes}
-        self.settings = engine._merge(DEFAULT_SETTINGS, settings)
-        self.bars = []
-        self.runtimes = []
+    def _capacity(self, settings: dict) -> int | None:
+        if settings["transport"] == "json" and self._segments_known:
+            segment = next((s for s in self.segments if s["id"] == int(settings["segment"])), None)
+            return segment["stop"] - segment["start"] if segment else 0
+        return self._strip_count
+
+    @property
+    def led_count(self) -> int:
+        capacity = self._capacity(self.settings)
+        return 30 if capacity is None else capacity
+
+    @property
+    def revision(self) -> int:
+        return self._rev
+
+    def configuration(self) -> dict:
+        return {"rev": self._rev, "device": self.describe(), "bars": self.bars, "settings": self.settings}
+
+    @staticmethod
+    def _normalize(bars: list) -> list:
+        result = []
+        ids = set()
         for raw in bars:
             if not isinstance(raw, dict):
                 continue
             bar = engine.normalize_bar(raw)
-            if not bar["id"]:
+            if not bar["id"] or bar["id"] in ids:
                 bar["id"] = uuid.uuid4().hex[:8]
-            self.bars.append(bar)
+            ids.add(bar["id"])
+            result.append(bar)
+        return result
+
+    def _apply(self, bars: list, settings: dict) -> None:
+        self._install(self._normalize(bars), engine._merge(DEFAULT_SETTINGS, settings))
+
+    def _install(self, bars: list, settings: dict) -> None:
+        old = {rt.bar["id"]: rt for rt in self.runtimes}
+        self.settings = settings
+        self.bars = bars
+        self.runtimes = []
+        for bar in bars:
             rt = old.get(bar["id"]) or BarRuntime(bar)
+            if rt.bar["source"] != bar["source"]:
+                rt.helper_finished = None
             rt.bar = bar
             self.runtimes.append(rt)
-        self._rev = getattr(self, "_rev", 0) + 1
+        self._rev += 1
         self._track_entities()
         self._wake.set()
 
-    async def async_save(self, bars: list | None, settings: dict | None) -> None:
-        old_transport = (self.settings["transport"], self.settings["segment"])
-        self._apply(
-            self.bars if bars is None else bars,
-            self.settings if settings is None else settings,
-        )
-        if old_transport != (self.settings["transport"], self.settings["segment"]):
-            seg = self.settings["segment"]
-            self.settings["segment"] = old_transport[1]
-            await self._give_back()
-            self.settings["segment"] = seg
-        await self._store.async_save(self._stored())
+    async def async_save(self, bars: list | None, settings: dict | None, expected_rev: int | None = None) -> None:
+        async with self._save_lock:
+            if expected_rev is not None and expected_rev != self._rev:
+                raise ConfigConflict("The strip changed while saving. Please try again.")
+            await self._save(bars, settings)
+
+    async def async_control(self, settings=None, bar_id=None, enabled=None) -> None:
+        """Apply a switch or slider to the latest configuration under the same lock."""
+        async with self._save_lock:
+            bars = None
+            if bar_id is not None and enabled is not None:
+                bars = [dict(b, enabled=enabled) if b["id"] == bar_id else b for b in self.bars]
+            await self._save(bars, {**self.settings, **settings} if settings else None)
+
+    async def _save(self, bars, settings) -> None:
+        settings = self.settings if settings is None else engine._merge(DEFAULT_SETTINGS, settings)
+        if bars is None:
+            bars = self.bars
+        else:
+            capacity = self._capacity(settings)
+            existing = {b["id"]: (b["start"], b["end"]) for b in self.bars}
+            for raw in bars:
+                # Older, out-of-range bars stay editable and do not block unrelated edits.
+                if not isinstance(raw, dict):
+                    continue
+                ends = (raw.get("start", 0), raw.get("end", 29))
+                if existing.get(raw.get("id")) == ends:
+                    continue
+                if any(not isinstance(n, (int, float)) or not math.isfinite(n) or n != int(n)
+                       or n < 0 or (capacity is not None and n >= capacity) for n in ends):
+                    limit = f"0–{capacity - 1}" if capacity else "the available LED range"
+                    raise ValueError(f"{raw.get('name', 'Bar')}: choose whole LED numbers in {limit}.")
+            bars = self._normalize(bars)
+        manual = self._stored()["manual"]
+        data = {"bars": bars, "settings": settings,
+                "manual": {b["id"]: manual[b["id"]] for b in bars if b["id"] in manual}}
+        await self._store.async_save(data)
+        self._install(bars, settings)
         async_dispatcher_send(self.hass, f"{SIGNAL_SETTINGS}_{self.entry.entry_id}")
 
     def _stored(self) -> dict:
@@ -345,6 +417,11 @@ class BarsManager:
         if self._unsub_states:
             self._unsub_states()
             self._unsub_states = None
+        if self._unsub_timers:
+            self._unsub_timers()
+            self._unsub_timers = None
+        if any(b["source"]["type"] == "timer" and b["source"]["entity"] for b in self.bars):
+            self._unsub_timers = self.hass.bus.async_listen("timer.finished", self._timer_finished)
         ids: set[str] = set()
         for bar in self.bars:
             src = bar["source"]
@@ -367,7 +444,24 @@ class BarsManager:
             )
 
     @callback
-    def _on_state(self, _event) -> None:
+    def _timer_finished(self, event) -> None:
+        entity = event.data.get("entity_id")
+        for rt in self.runtimes:
+            source = rt.bar["source"]
+            if source["type"] == "timer" and source["entity"] == entity:
+                rt.helper_finished = time.monotonic()
+                rt.was_full = False
+                self._wake.set()
+
+    @callback
+    def _on_state(self, event) -> None:
+        state = event.data.get("new_state")
+        if state is not None and state.state in ("active", "paused"):
+            entity = event.data["entity_id"]
+            if entity.startswith("timer."):
+                for rt in self.runtimes:
+                    if rt.bar["source"]["type"] == "timer" and rt.bar["source"]["entity"] == entity:
+                        rt.helper_finished = None
         self._wake.set()
 
     def find_bar(self, key: str) -> BarRuntime | None:
@@ -448,7 +542,9 @@ class BarsManager:
             "name": self.name,
             "host": self.host,
             "led_count": self.led_count,
+            "strip_count": self._strip_count,
             "segments": self.segments,
+            "segments_known": self._segments_known,
             "online": self.online,
         }
 
@@ -484,9 +580,10 @@ class BarsManager:
         uptime = int(info.get("uptime", 0) or 0)
         rebooted = self._last_uptime is not None and uptime < self._last_uptime
         self._last_uptime = uptime
-        self.led_count = int((info.get("leds") or {}).get("count", self.led_count) or self.led_count)
+        old_shape = (self._strip_count, self.segments, self._segments_known)
+        self._strip_count = int((info.get("leds") or {}).get("count") or self._strip_count or 30)
         self.name = info.get("name") or self.name
-        if not self.online or rebooted or not self.segments:
+        if not self.online or rebooted or not self.segments or self.settings["transport"] == "json":
             try:
                 state = await self.client.state()
                 self.segments = [
@@ -499,8 +596,13 @@ class BarsManager:
                     for n, seg in enumerate(state.get("seg", []))
                     if isinstance(seg, dict) and seg.get("stop", 0)
                 ]
+                self._segments_known = True
             except WledError:
                 pass
+        if old_shape != (self._strip_count, self.segments, self._segments_known):
+            if self.settings["transport"] == "json":
+                self._sent = {idx: px for idx, px in self._sent.items() if idx < self.led_count}
+            self._rev += 1
         if not self.online:
             _LOGGER.info("WLED at %s is reachable", self.host)
         self.online = True
@@ -633,6 +735,10 @@ class BarsManager:
             st = self.hass.states.get(src["entity"]) if src["entity"] else None
             if st is None or st.state.lower() in UNAVAILABLE:
                 return ("unavailable" if src["entity"] else "idle", 0.0, None)
+            if rt.helper_finished is not None:
+                if st.state in ("active", "idle") and time.monotonic() - rt.helper_finished < self._celebration_seconds(bar):
+                    return ("active", 1.0, 0.0)
+                rt.helper_finished = None
             duration = parse_duration(st.attributes.get("duration"))
             if st.state == "active" and duration:
                 finishes = dt_util.parse_datetime(str(st.attributes.get("finishes_at", "")))
@@ -782,6 +888,8 @@ class BarsManager:
             rt.easing = False
             return None
 
+        if max(bar["start"], bar["end"]) >= self.led_count:
+            return hidden("range")
         if not self.settings["enabled"] or not bar["enabled"]:
             rt.dist_start = None  # an "auto" trip starts over when the bar next appears
             if bar["enabled"]:
@@ -814,14 +922,14 @@ class BarsManager:
         if state == "idle" and vis["hide_when_idle"]:
             rt.was_full = None
             return hidden("idle")
-        if vis["hide_at_zero"] and frac <= 0.0:
+        if vis["hide_at_zero"] and frac <= 0.0 and rt.helper_finished is None:
             rt.was_full = False
             return hidden("zero")
 
         # completion: only celebrate when we actually watched it reach 100 %
         full = state == "active" and raw >= 1.0 - 1e-6
-        if full and rt.was_full is False:
-            rt.complete_since = now
+        if full and rt.was_full is False and (bar["source"]["type"] != "timer" or rt.helper_finished is not None):
+            rt.complete_since = rt.helper_finished if rt.helper_finished is not None else now
         if not full:
             rt.complete_since = None
         rt.was_full = full
@@ -1056,7 +1164,7 @@ class BarsManager:
         step = 1.0  # seconds between frames for bars that only creep with time
 
         preview = self._preview
-        if preview and now > preview[2]:
+        if preview and (now > preview[2] or max(preview[0]["start"], preview[0]["end"]) >= self.led_count):
             preview = self._preview = None
 
         def paint(bar: dict, ctx: dict) -> list:
@@ -1117,6 +1225,8 @@ class BarsManager:
                 self._flash = None
             else:
                 for idx, px in zip(leds, flash_pixels(look, len(leds), age)):
+                    if idx >= self.led_count:
+                        continue
                     frame[idx] = tuple(int(round(max(0.0, min(255.0, v * bright)))) for v in px)
                 animated = True
 
@@ -1135,6 +1245,7 @@ class BarsManager:
                 round(rt.status.get("percent") or 0.0),
                 rt.status.get("visible"),
                 rt.status.get("text"),
+                rt.status.get("color"),
             )
             for rt in self.runtimes
         )
@@ -1183,13 +1294,21 @@ class BarsManager:
             listener(snapshot)
 
     async def _push(self, frame: dict[int, tuple[int, int, int]]) -> None:
+        transport = self.settings["transport"]
+        segment = int(self.settings["segment"])
+        count = self.led_count
+        if self._owned_segment is not None and (transport != "json" or self._owned_segment != segment):
+            await self._give_back()
+        if transport != self._output_transport:
+            self._active = False
+            self._output_transport = transport
         power_on = bool(frame) and not self._active and bool(self.settings["auto_power"])
 
-        if self.settings["transport"] == "ddp":
+        if transport == "ddp":
             if frame:
                 if power_on:
                     await self.client.post_state({"on": True})
-                buf = bytearray(self.led_count * 3)
+                buf = bytearray(count * 3)
                 for idx, (r, g, b) in frame.items():
                     buf[idx * 3 : idx * 3 + 3] = bytes((r, g, b))
                 self.client.send_ddp(bytes(buf))
@@ -1198,13 +1317,11 @@ class BarsManager:
             self._active = bool(frame)
             return
 
-        segment = int(self.settings["segment"])
         if not frame:
-            if self._sent:
-                if self.settings["idle"] == "release":
-                    await self.client.release(segment)
-                else:
-                    await self.client.set_pixels(segment, {i: BLACK for i in self._sent}, False)
+            if self._owned_segment is not None and self.settings["idle"] == "release":
+                await self._give_back()
+            elif self._sent:
+                await self.client.set_pixels(segment, {i: BLACK for i in self._sent}, False)
                 self._sent = {}
             self._active = False
             return
@@ -1214,6 +1331,8 @@ class BarsManager:
             target.setdefault(idx, BLACK)  # LEDs of a bar that just hid
         changes = {i: c for i, c in target.items() if self._sent.get(i) != c}
         if changes or power_on:
+            # A multi-request paint can fail after the first chunk has frozen WLED.
+            self._owned_segment = segment
             await self.client.set_pixels(segment, changes, power_on)
             self._sent = target
             if len(changes) == len(target):  # everything was sent, not just what moved

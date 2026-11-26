@@ -20,12 +20,12 @@ export function layoutStripLabels({ w, n, perRow, rows, size, x0 }, ranges, minT
       const left = Math.max(0, Math.min(start, right - minTarget));
       const part = { range, first, last, left, right, lineLeft, lineRight, named, labelLeft, labelWidth };
       const lanes = result[row];
-      let lane = lanes.find(items => items.every(item => item.right + gap <= left || right + gap <= item.left));
-      if (!lane) {
-        lane = [];
-        lanes.push(lane);
-      }
-      lane.push(part);
+      // A later bar goes below every earlier bar it crosses, even if an upper lane has room.
+      const lastOverlap = lanes.findLastIndex(items =>
+        items.some(item => item.right + gap > left && right + gap > item.left));
+      const lane = lastOverlap + 1;
+      if (lane === lanes.length) lanes.push([]);
+      lanes[lane].push(part);
       first = last + 1;
     }
   }
