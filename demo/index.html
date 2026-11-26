@@ -60,19 +60,18 @@ const stores = {
   shelf: {
     device: { entry_id: "shelf", name: "Shelf strip (demo)", host: "192.168.1.51", led_count: 30, online: true, segments: [{ id: 0, start: 0, stop: 30, name: "" }] },
     bars: [{ id: "s1", name: "Temperature", start: 0, end: 14, kind: "temperature", source: { entity: "sensor.living_room_temperature", min: 60, max: 85 } }].map(E.normalizeBar),
-    settings: { ...settings },
+    settings: { ...settings }, rev: 1,
   },
 };
 let current = "demo";
-const store = (id) => (id === current ? { device, bars, settings } : stores[id]);
+const store = (id) => (id === current ? { device, bars, settings, rev } : stores[id]);
 const use = (id) => {
   if (id === current || !stores[id]) return;
-  stores[current] = { device, bars, settings };
-  ({ device, bars, settings } = stores[id]);
+  stores[current] = { device, bars, settings, rev };
+  ({ device, bars, settings, rev } = stores[id]);
   stores[id] = null;
   current = id;
   LEDS = device.led_count;
-  rev++;
 };
 const tidy = (list) => list.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
 const listeners = new Set();
@@ -149,18 +148,20 @@ const hass = {
     if (type === "devices") return ["demo", "shelf"].map((id) => store(id).device);
     if (type === "presets_get") return presets;
     if (type === "presets_save") { presets = msg.presets; return presets; }
-    if (type === "get") return JSON.parse(JSON.stringify(store(msg.entry_id)));
+    if (type === "get") return structuredClone(store(msg.entry_id));
     if (type === "save") {
+      if (msg.expected_rev !== store(msg.entry_id).rev) throw { code: "config_conflict", message: "Strip changed" };
       if (msg.entry_id !== current) {
         const other = stores[msg.entry_id];
         if (msg.bars) other.bars = tidy(msg.bars);
         if (msg.settings) other.settings = msg.settings;
-        return { bars: other.bars, settings: other.settings };
+        other.rev++;
+        return structuredClone(other);
       }
       if (msg.bars) bars = tidy(msg.bars);
       if (msg.settings) settings = msg.settings;
       rev++;
-      return { bars, settings };
+      return structuredClone({ device, bars, settings, rev });
     }
     if (type === "control") {
       if (msg.enabled !== undefined) settings = { ...settings, enabled: msg.enabled };

@@ -115,12 +115,10 @@ class WledClient:
     ) -> None:
         """Paint individual LEDs (indices relative to the segment)."""
         chunks = compress_changes(changes)
-        if not chunks and power_on:
+        if power_on:
             await self.post_state({"on": True})
-        for n, chunk in enumerate(chunks):
+        for chunk in chunks:
             payload: dict = {"seg": [{"id": segment, "i": chunk}]}
-            if power_on and n == 0:
-                payload["on"] = True
             await self.post_state(payload)
 
     async def release(self, segment: int) -> None:

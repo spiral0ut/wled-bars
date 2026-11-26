@@ -97,11 +97,7 @@ async def _async_setup_shared(hass: HomeAssistant) -> None:
 
     async def set_enabled(call: ServiceCall) -> None:
         mgr, rt = _find(hass, call.data)
-        bars = [dict(b) for b in mgr.bars]
-        for bar in bars:
-            if bar["id"] == rt.bar["id"]:
-                bar["enabled"] = call.data["enabled"]
-        await mgr.async_save(bars, None)
+        await mgr.async_control(bar_id=rt.bar["id"], enabled=call.data["enabled"])
 
     async def flash(call: ServiceCall) -> None:
         data = call.data

@@ -3,9 +3,10 @@
 // engine as the backend (engine.js mirrors engine.py).
 // Load matching frontend modules when Home Assistant switches release versions.
 const revision = new URL(import.meta.url).search;
-const [E, { layoutStripLabels }] = await Promise.all([
+const [E, { layoutStripLabels }, { saveConfigEdit }] = await Promise.all([
   import("./engine.js" + revision),
   import("./strip-labels.js" + revision),
+  import("./config-edits.js" + revision),
 ]);
 
 const DOMAIN = "wled_bars";
@@ -168,6 +169,16 @@ export function adoptBars(incoming, existing, from, to) {
   });
 }
 
+const rangeFits = (bar, count) => [bar.start, bar.end].every(n => Number.isInteger(n) && n >= 0 && n < count);
+const rangeError = count => count ? `Choose LEDs from 0 to ${count - 1}.` : "Choose an available WLED segment in Device settings.";
+const addressableLeds = (device, settings) => {
+  if (settings.transport === "json" && (device.segments_known || device.segments?.length)) {
+    const segment = device.segments.find(s => s.id === Number(settings.segment));
+    return segment ? segment.stop - segment.start : 0;
+  }
+  return device.strip_count ?? device.led_count;
+};
+
 // What a chosen file holds, or null when it isn't a WLED Bars export.
 export function readExport(text) {
   let data;
@@ -175,7 +186,8 @@ export function readExport(text) {
   if (Array.isArray(data)) data = { bars: data };
   if (!data || typeof data !== "object" || !Array.isArray(data.bars)) return null;
   const bars = data.bars.filter((b) => b && typeof b === "object" && !Array.isArray(b) && b.source !== null);
-  if (!bars.length || bars.length !== data.bars.length) return null;
+  if (bars.length !== data.bars.length || (!bars.length &&
+      !(data.wled_bars === 1 && data.settings && typeof data.settings === "object" && !Array.isArray(data.settings)))) return null;
   const dev = data.device && typeof data.device === "object" ? data.device : {};
   return {
     bars: bars.map((b) => E.normalizeBar(b)),
@@ -417,6 +429,7 @@ export function eventInfo(source, states, now = Date.now()) {
 // What a bar is doing right now, in plain words: {tone, text}.
 function barStatus(bar, i, o) {
   const st = o.live[bar.id];
+  if (st?.why === "range") return { tone: "warn", text: "Outside the LED range · edit its position" };
   const states = o.states || {};
   const nm = (id) => states[id]?.attributes?.friendly_name || id;
   const getState = (id) => (states[id] ? states[id].state : null);
@@ -730,7 +743,7 @@ class StripLabels {
   }
 
   layout(base) {
-    const minTarget = this.touch.matches ? 44 : 24;
+    const minTarget = this.edit ? (this.touch.matches ? 44 : 24) : 0;
     if (this.cached?.w === base.w && this.cached.n === base.n && this.minTarget === minTarget) return this.cached;
     this.minTarget = minTarget;
     const active = this.el.getRootNode().activeElement;
@@ -766,11 +779,14 @@ class StripLabels {
     if (range.start !== range.end && range.end >= part.first && range.end <= part.last) {
       line.classList.add(range.start < range.end ? "right" : "left");
     }
-    const button = h("button", {
-      type: "button", class: "strip-range", tabIndex: part.named ? 0 : -1, "data-bar-id": range.id,
+    const action = this.edit ? {
+      type: "button", tabIndex: part.named ? 0 : -1,
       "aria-label": `Edit ${range.label}, LEDs ${range.start} to ${range.end}`,
-      style: `grid-row:${lane + 1};margin-left:${left}px;width:${right - left}px;--range-color:${range.color}`,
       onclick: () => this.edit(range.id),
+    } : {};
+    const button = h(this.edit ? "button" : "span", {
+      ...action, class: "strip-range", "data-bar-id": range.id,
+      style: `grid-row:${lane + 1};margin-left:${left}px;width:${right - left}px;--range-color:${range.color}`,
     }, line);
     if (part.named) {
       range.text.style.marginLeft = (part.labelLeft - left) + "px";
@@ -785,7 +801,7 @@ class StripView {
   constructor(canvas, opts = {}) {
     this.c = canvas;
     // zoom: px per LED on one scrolling row (0 = fit the width, wrapping if needed); ruler: LED numbers above
-    this.o = Object.assign({ max: 26, min: 9, labels: false, zoom: 0, ruler: false }, opts);
+    this.o = Object.assign({ max: 26, min: 9, zoom: 0, ruler: false }, opts);
     this.pixels = [];
     this.ranges = []; // {start, end, color, label}
     this.sel = null; // {start, end}
@@ -846,7 +862,7 @@ class StripView {
           canvas.style.cursor = z === "move" ? "grab" : z === "new" ? "crosshair" : "ew-resize";
           return;
         }
-        const box = this.o.zoom && canvas.parentElement;
+        const box = this.o.zoom && canvas.closest(".scroller");
         if (box) {
           // dragging near the edge of a zoomed strip scrolls it along
           const r = box.getBoundingClientRect();
@@ -872,10 +888,11 @@ class StripView {
   layout() {
     const n = Math.max(1, this.pixels.length);
     const top = this.o.ruler ? 14 : 0;
-    const extra = this.o.labels ? 16 : 6;
+    const extra = 6;
     if (this.o.zoom) {
       const size = this.o.zoom;
-      return { w: n * size, n, size, perRow: n, rows: 1, top, rowH: top + size + extra, x0: 0 };
+      const base = { w: n * size, n, size, perRow: n, rows: 1, top, rowH: top + size + extra, x0: 0 };
+      return this.o.annotations ? this.o.annotations.layout(base) : base;
     }
     const w = Math.max(120, this.c.clientWidth || this.c.parentElement?.clientWidth || 600);
     let size = Math.min(this.o.max, w / n);
@@ -896,11 +913,12 @@ class StripView {
     const y = e.clientY - r.top;
     let row = L.rowTops ? L.rowTops.findIndex(top => y >= top && y < top + L.top + L.size) : Math.floor(y / L.rowH);
     if (clampToStrip) {
+      if (L.rowTops && row < 0) row = L.rowTops.findLastIndex(top => y >= top);
       col = Math.max(0, Math.min(L.perRow - 1, col));
       row = Math.max(0, Math.min(L.rows - 1, row));
     } else if (col < 0 || col >= L.perRow || row < 0 || row >= L.rows) return null;
     const led = row * L.perRow + col;
-    return L.rowTops && led >= L.n ? null : Math.min(L.n - 1, led);
+    return !clampToStrip && L.rowTops && led >= L.n ? null : Math.min(L.n - 1, led);
   }
 
   get light() {
@@ -1005,14 +1023,6 @@ class StripView {
         const [x, y] = pos(i);
         g.fillRect(x - L.size / 2 + (i === lo ? 2 : 0), y + L.size / 2 + 1, L.size - (i === lo ? 2 : 0) - (i === hi ? 2 : 0), 3);
       }
-      if (rg.label && this.o.labels && lo < L.n) {
-        const [x, y] = pos(lo);
-        g.font = "10px system-ui, sans-serif";
-        g.textBaseline = "top";
-        g.fillStyle = P.label;
-        // keep the name inside the canvas when its bar starts near the right edge
-        g.fillText(rg.label, Math.max(2, Math.min(x - L.size / 2 + 2, L.w - g.measureText(rg.label).width - 2)), y + L.size / 2 + 5);
-      }
     }
 
     if (this.sel) {
@@ -1082,6 +1092,7 @@ const CSS = `
 .strip-range{grid-column:1;justify-self:start;align-self:start;position:relative;display:block;pointer-events:auto;
   min-width:0;min-height:28px;padding:9px 0 3px;border:0;border-radius:4px;background:transparent;color:var(--wb-text);
   font:inherit;text-align:left;cursor:pointer}
+span.strip-range{pointer-events:none;cursor:default;min-height:22px}
 .strip-range:focus-visible{background:color-mix(in srgb,var(--range-color) 12%,transparent)}
 @media(hover:hover){.strip-range:hover{background:color-mix(in srgb,var(--range-color) 12%,transparent)}}
 @media(pointer:coarse){.strip-range{min-height:44px}}
@@ -1381,32 +1392,46 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _selectDevice(entryId) {
+    const selection = this._selection = Symbol();
     this._unsubscribe();
     this._entry = entryId;
-    try { localStorage.setItem("wled_bars_entry", entryId); } catch (_e) { /* ignore */ }
-    const data = await this.ws("get", { entry_id: entryId });
-    this._device = data.device;
-    this._bars = data.bars;
-    this._settings = data.settings;
+    this._device = this._config = null;
+    this._bars = [];
+    this._live = { pixels: [], bars: {}, online: true };
     this._view = "list";
+    this._error = null;
+    this._render();
+    try { localStorage.setItem("wled_bars_entry", entryId); } catch (_e) { /* ignore */ }
+    try {
+      const data = await this.ws("get", { entry_id: entryId });
+      if (selection !== this._selection) return;
+      this._acceptConfig(data);
+    } catch (err) {
+      if (selection !== this._selection) return;
+      this._error = err?.message || String(err);
+      this._render();
+      return;
+    }
     this._render();
     this._subscribe();
     if (this._devices.length > 1) this._loadOthers();
   }
 
   async _subscribe() {
-    const entry = this._entry;
+    const entry = this._entry, selection = this._selection;
     const unsub = await this._hass.connection.subscribeMessage(
       (msg) => {
-        if (entry !== this._entry) return;
+        if (selection !== this._selection) return;
         this._live.pixels = hexToPixels(msg.leds);
         this._live.online = msg.online;
         this._live.bars = Object.fromEntries((msg.bars || []).filter((b) => b && b.id).map((b) => [b.id, b]));
         this._liveDirty = true;
+        if (msg.rev > this._config?.rev && this._view === "list" && !this._pointerDown &&
+            !this.shadowRoot.querySelector("dialog[open]")) this._refreshConfig();
       },
       { type: `${DOMAIN}/subscribe`, entry_id: entry }
     );
-    if (entry !== this._entry || !this.isConnected) unsub();
+    if (selection !== this._selection || !this.isConnected) unsub();
     else this._unsub = unsub;
   }
 
@@ -1415,10 +1440,42 @@ class WledBarsPanel extends HTMLElement {
     this._unsub = null;
   }
 
-  async _saveBars(bars) {
-    const res = await this.ws("save", { entry_id: this._entry, bars });
-    this._bars = res.bars;
-    this._settings = res.settings;
+  _acceptConfig(data) {
+    if (data.device.entry_id !== this._entry || (this._config && data.rev < this._config.rev)) return;
+    this._config = data;
+    this._device = data.device;
+    this._bars = clone(data.bars); // the timeline edits its working copy while dragging
+    this._settings = data.settings;
+    this._devices = this._devices.map(dev => dev.entry_id === this._entry ? data.device : dev);
+  }
+
+  async _refreshConfig() {
+    const selection = this._selection;
+    if (this._refreshing === selection) return;
+    this._refreshing = selection;
+    try {
+      const data = await this.ws("get", { entry_id: this._entry });
+      if (selection !== this._selection || this._view !== "list" || this._pointerDown ||
+          this.shadowRoot.querySelector("dialog[open]") || data.rev <= this._config.rev) return;
+      this._acceptConfig(data);
+      this._render();
+    } catch (_err) { /* the next live update retries */ }
+    finally { if (this._refreshing === selection) this._refreshing = null; }
+  }
+
+  async _saveEdit(changes, base = this._config, undoText) {
+    try {
+      const result = await saveConfigEdit((type, data) => this.ws(type, data), base, changes);
+      if (this._config) this._acceptConfig(result.saved);
+      if (undoText) this._toast(undoText, async () => {
+        await this._saveEdit(result.previous, result.saved);
+        if (this._view === "list") this._render();
+      });
+      return true;
+    } catch (err) {
+      this._toast(err?.message || String(err));
+      return false;
+    }
   }
 
   // ----- render: shell -----
@@ -1461,8 +1518,9 @@ class WledBarsPanel extends HTMLElement {
     if (!this._device) {
       wrap.append(
         h("div", { class: "card empty" },
-          h("h2", {}, "No WLED device yet"),
-          h("p", { class: "dim" }, this._error || "Add one under Settings → Devices & services → Add integration → WLED Bars."))
+          h("h2", {}, this._entry ? (this._error ? "Couldn’t load this strip" : "Loading strip…") : "No WLED device yet"),
+          this._entry ? (this._error && h("button", { class: "btn", onclick: () => this._selectDevice(this._entry) }, "Retry"))
+            : h("p", { class: "dim" }, this._error || "Add one under Settings → Devices & services → Add integration → WLED Bars."))
       );
       return;
     }
@@ -1481,7 +1539,10 @@ class WledBarsPanel extends HTMLElement {
       if (index >= 0) this._edit(index);
     });
     this._liveStrip = new StripView(canvas, { annotations, ruler: true, max: 22, onClick: (led) => {
-      for (let k = this._bars.length - 1; k >= 0; k--) if (E.barLeds(this._bars[k]).includes(led)) return this._edit(k);
+      for (let k = this._bars.length - 1; k >= 0; k--) {
+        const b = this._bars[k];
+        if (led >= Math.min(b.start, b.end) && led <= Math.max(b.start, b.end)) return this._edit(k);
+      }
       return null;
     } });
     this._liveStrip.pixels = new Array(dev.led_count).fill([0, 0, 0]);
@@ -1565,7 +1626,7 @@ class WledBarsPanel extends HTMLElement {
           onchange: async (e) => {
             const bars = clone(this._bars);
             bars[i].enabled = e.target.checked;
-            await this._saveBars(bars);
+            await this._saveEdit({ bars });
             this._render();
           } }))
     );
@@ -1605,9 +1666,11 @@ class WledBarsPanel extends HTMLElement {
 
   // Save the bar list as it is now and offer to put `before` back.
   async _commit(before, text) {
-    await this._saveBars(this._bars);
-    this._render();
-    this._toast(text, async () => { await this._saveBars(before); this._render(); });
+    const base = { ...this._config, bars: before };
+    const wanted = this._bars;
+    this._bars = clone(this._config.bars);
+    await this._saveEdit({ bars: wanted }, base, text);
+    if (this._view === "list") this._render();
   }
 
   // 24 hours, one row per bar: when each bar may show, and where bars on the same LEDs collide.
@@ -1663,7 +1726,7 @@ class WledBarsPanel extends HTMLElement {
             if (b - a < 30) return;
             const before = clone(this._bars);
             bar.visibility.conditions.push({ type: "time", start: hhmm(a), end: hhmm(b), days: [] });
-            this._commit(before, `“${bar.name}” now shows ${hhmm(a)}–${hhmm(b)}`);
+            this._commit(before, `“${bar.name}” now shows ${hhmm(a)}–${hhmm(b)} every day`);
           });
         track.append(any, ghost);
       }
@@ -1744,7 +1807,7 @@ class WledBarsPanel extends HTMLElement {
     const card = h("div", { class: "card" },
       h("div", { class: "rowx" },
         h("div", { class: "grow" }, h("h2", {}, "Through the day"),
-          h("div", { class: "dim sm" }, "Drag a block to change when a bar shows, or drag across an empty row to give it hours.")),
+          h("div", { class: "dim sm" }, "Drag a block to change its hours. Drag across an empty row to set hours for every day.")),
         usesDays && h("div", { class: "days" }, DAY_LETTERS.map((letter, x) =>
           h("button", { class: "day" + (x === day ? " on" : "") + (x === today ? " today" : ""), title: DAY_NAMES[x] + (x === today ? " (today)" : ""),
             onclick: () => { this._tlDay = x; this._render(); } }, letter)))),
@@ -1756,7 +1819,7 @@ class WledBarsPanel extends HTMLElement {
   _newBar(tpl) {
     const count = this._device.led_count;
     const taken = new Array(count).fill(false);
-    for (const b of this._bars) for (const i of E.barLeds(b)) if (i < count) taken[i] = true;
+    for (const b of this._bars) taken.fill(true, Math.min(b.start, b.end), Math.max(b.start, b.end) + 1);
     let best = [0, 0];
     for (let i = 0, run = 0; i <= count; i++) {
       if (i < count && !taken[i]) run++;
@@ -1792,6 +1855,7 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _openEditor() {
+    this._draftBase = this._config;
     this._view = "edit";
     this._sim = { frac: 0.62, play: false, live: true, t0: 0, completeAt: null, unavailable: false };
     this._closed = new Set();
@@ -1809,13 +1873,14 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _duplicate(i) {
+    if (!this._config || !this._bars[i]) return;
     const bars = clone(this._bars);
     const copy = clone(bars[i]);
     copy.id = "";
     copy.name = freeName(copy.name, bars.map((b) => b.name));
     bars.splice(i + 1, 0, copy);
-    await this._saveBars(bars);
-    this._render();
+    await this._saveEdit({ bars });
+    if (this._view === "list") this._render();
   }
 
   // ----- copy to another strip, save to a file, load from a file -----
@@ -1823,12 +1888,13 @@ class WledBarsPanel extends HTMLElement {
   _copyDialog(i) {
     const bar = this._bars[i];
     const others = this._devices.filter((d) => d.entry_id !== this._entry);
+    const sourceCount = this._device.led_count;
     let target = others[0];
     let busy = false;
     const dlg = h("dialog");
     const draw = () => {
       dlg.innerHTML = "";
-      const [a, b] = fitRange(bar.start, bar.end, this._device.led_count, target.led_count);
+      const [a, b] = fitRange(bar.start, bar.end, sourceCount, target.led_count);
       const moved = a !== bar.start || b !== bar.end;
       dlg.append(
         h("div", { style: "padding:16px 16px 4px" },
@@ -1847,12 +1913,11 @@ class WledBarsPanel extends HTMLElement {
             busy = true;
             try {
               const there = await this.ws("get", { entry_id: target.entry_id });
-              const [copy] = adoptBars([{ ...bar, id: "" }], there.bars, this._device.led_count, there.device.led_count);
-              await this.ws("save", { entry_id: target.entry_id, bars: there.bars.concat(copy) });
+              const [copy] = adoptBars([{ ...bar, id: "" }], there.bars, sourceCount, there.device.led_count);
+              const text = `Copied “${bar.name}” to ${there.device.name} as “${copy.name}”`;
+              const saved = await this._saveEdit({ bars: there.bars.concat(copy) }, there, text);
+              if (saved) this._loadOthers();
               dlg.close();
-              this._loadOthers();
-              this._toast(`Copied “${bar.name}” to ${target.name}` + (copy.name !== bar.name ? ` as “${copy.name}”` : ""),
-                async () => { await this.ws("save", { entry_id: target.entry_id, bars: there.bars }); this._loadOthers(); });
             } catch (err) {
               dlg.close();
               this._toast(`Couldn’t copy to ${target.name}: ${err?.message || err}`);
@@ -1895,9 +1960,10 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _importDialog(file, filename) {
-    const here = this._device;
+    const base = this._config;
+    const here = base.device;
     let mode = this._bars.length ? "add" : "replace";
-    let withSettings = false;
+    let withSettings = file.bars.length === 0 && !!file.settings;
     let busy = false;
     const refit = here.led_count > 0 && file.bars.some((b) => Math.max(b.start, b.end) >= here.led_count);
     const n = file.bars.length;
@@ -1925,25 +1991,15 @@ class WledBarsPanel extends HTMLElement {
           h("button", { class: "btn pri", onclick: async () => {
             if (busy) return;
             busy = true;
-            const before = { bars: clone(this._bars), settings: clone(this._settings) };
-            const keep = mode === "add" ? this._bars : [];
-            const bars = keep.concat(adoptBars(file.bars, keep, file.led_count, here.led_count));
-            const msg = { entry_id: this._entry, bars };
-            if (withSettings) msg.settings = { ...file.settings, segment: this._settings.segment };
-            const apply = async (m) => {
-              const res = await this.ws("save", m);
-              this._bars = res.bars;
-              this._settings = res.settings;
-              this._render();
-            };
-            try {
-              await apply(msg);
-              dlg.close();
-              this._toast(`Loaded ${n} bar${n === 1 ? "" : "s"} from the file`, () => apply({ entry_id: this._entry, ...before }));
-            } catch (err) {
-              dlg.close();
-              this._toast(`Couldn’t load the file: ${err?.message || err}`);
-            }
+            const keep = mode === "add" ? base.bars : [];
+            const settings = withSettings ? { ...file.settings, segment: base.settings.segment } : base.settings;
+            const count = addressableLeds(here, settings);
+            const changes = { bars: keep.concat(adoptBars(file.bars, keep, file.led_count, count)) };
+            if (withSettings) changes.settings = settings;
+            const saved = await this._saveEdit(changes, base, `Loaded ${n} bar${n === 1 ? "" : "s"} from the file`);
+            busy = false;
+            dlg.close();
+            if (saved) this._render();
           } }, mode === "replace" && this._bars.length ? "Replace" : "Load")));
     };
     dlg.addEventListener("close", () => dlg.remove());
@@ -1954,11 +2010,13 @@ class WledBarsPanel extends HTMLElement {
 
   // Bar names on the other strips, to warn about names an automation could not tell apart.
   async _loadOthers() {
+    const selection = this._selection;
     const others = {};
     for (const d of this._devices) {
       if (d.entry_id === this._entry) continue;
       try { others[d.name] = (await this.ws("get", { entry_id: d.entry_id })).bars.map((b) => b.name); } catch (_e) { /* skip */ }
     }
+    if (selection !== this._selection) return;
     this._others = others;
     this._syncNameNote();
   }
@@ -2005,8 +2063,8 @@ class WledBarsPanel extends HTMLElement {
     const bars = clone(this._bars);
     const [item] = bars.splice(from, 1);
     bars.splice(to, 0, item);
-    await this._saveBars(bars);
-    this._render();
+    await this._saveEdit({ bars });
+    if (this._view === "list") this._render();
   }
 
   _kind(d) {
@@ -2030,8 +2088,9 @@ class WledBarsPanel extends HTMLElement {
   }
 
   async _saveSettings(settings) {
-    const res = await this.ws("save", { entry_id: this._entry, settings });
-    this._settings = res.settings;
+    const saved = await this._saveEdit({ settings });
+    if (this._view === "list") this._render();
+    return saved;
   }
 
   // ----- render: editor -----
@@ -2183,19 +2242,27 @@ class WledBarsPanel extends HTMLElement {
     this._view = "list";
     this._draft = null;
     this._render();
+    this._refreshConfig();
   }
 
   async _saveDraft() {
-    const bars = clone(this._bars);
-    const bar = E.normalizeBar(this._draft);
+    if (this._savingDraft || !this._draft) return;
+    const draft = this._draft, base = this._draftBase;
+    if (!rangeFits(draft, this._device.led_count)) {
+      this._toast(rangeError(this._device.led_count));
+      return;
+    }
+    const bars = clone(base.bars), bar = E.normalizeBar(draft);
     if (!bar.name.trim()) bar.name = "Bar";
-    if (this._draftIndex >= 0) bars[this._draftIndex] = bar;
-    else bars.push(bar);
-    this._stripPreview(false);
-    await this._saveBars(bars);
-    this._view = "list";
-    this._draft = null;
-    this._render();
+    if (bar.id) {
+      const index = bars.findIndex(b => b.id === bar.id);
+      if (index < 0) return;
+      bars[index] = bar;
+    } else bars.push(bar);
+    this._savingDraft = true;
+    try {
+      if (await this._saveEdit({ bars }, base) && this._draft === draft) this._closeEditor();
+    } finally { this._savingDraft = false; }
   }
 
   _touch(structural) {
@@ -2222,6 +2289,10 @@ class WledBarsPanel extends HTMLElement {
     this._pushTimer = setTimeout(() => {
       if (!this._onStrip || !this._draft) return;
       const bar = E.normalizeBar(this._draft);
+      if (!rangeFits(this._draft, this._device.led_count)) {
+        this.ws("preview", { entry_id: this._entry, bar: null }).catch(() => {});
+        return;
+      }
       if (this._draftIndex < 0) bar.id = "__draft__";
       this.ws("preview", { entry_id: this._entry, bar, frac: this._sim.frac }).catch(() => {});
     }, now ? 0 : 150);
@@ -2245,7 +2316,10 @@ class WledBarsPanel extends HTMLElement {
     const upd = (v, structural) => { obj[key] = v; this._touch(structural || o.structural); };
     if (type === "num")
       return h("input", { type: "number", min: o.min, max: o.max, step: o.step ?? 1, value: obj[key],
-        oninput: (e) => { if (e.target.value !== "" && !Number.isNaN(Number(e.target.value))) upd(Number(e.target.value)); } });
+        oninput: (e) => {
+          if (e.target.value !== "") upd(Number(e.target.value));
+          else if (o.required) upd(null);
+        }, required: o.required });
     if (type === "range") {
       const out = h("output", {}, fmt(obj[key]) + (o.unit || ""));
       return h("span", { class: "rg" },
@@ -2819,8 +2893,12 @@ class WledBarsPanel extends HTMLElement {
     const pick = h("canvas");
     const ZOOMS = [0, 13, 20, 28]; // px per LED; 0 = fit the whole strip in view
     const zoom = ZOOMS[this._zoomIdx] || 0;
-    if (zoom) pick.style.width = count * zoom + "px";
-    const scroller = h("div", { class: "scroller", onscroll: (e) => { this._pickScroll = e.target.scrollLeft; } }, pick);
+    const ranges = this._bars.flatMap((b, i) => i === this._draftIndex ? [] :
+      [{ id: b.id, start: b.start, end: b.end, label: b.name, color: this._barColor(i) }]);
+    const annotations = new StripLabels(ranges);
+    const stage = h("div", { class: "strip-overview" }, pick, annotations.el);
+    if (zoom) stage.style.width = count * zoom + "px";
+    const scroller = h("div", { class: "scroller", onscroll: (e) => { this._pickScroll = e.target.scrollLeft; } }, stage);
     const setZoom = (idx) => (e) => {
       e.preventDefault();
       this._zoomIdx = Math.max(0, Math.min(ZOOMS.length - 1, idx));
@@ -2832,7 +2910,7 @@ class WledBarsPanel extends HTMLElement {
       h("button", { title: "Zoom out", disabled: !zoom, onclick: setZoom(this._zoomIdx - 1) }, ic("zoomout", 15)),
       h("button", { title: "Zoom in", disabled: this._zoomIdx >= ZOOMS.length - 1, onclick: setZoom(this._zoomIdx + 1) }, ic("zoomin", 15)));
     this._picker = new StripView(pick, {
-      labels: true, ruler: true, max: 22, zoom,
+      annotations, ruler: true, max: 22, zoom,
       // dragging never changes which way the bar runs; only "Flip direction" does
       onSelect: (lo, hi, done) => {
         const reversed = d.start > d.end;
@@ -2842,20 +2920,21 @@ class WledBarsPanel extends HTMLElement {
       },
     });
     const posInfo = h("div", { class: "dim sm full" });
-    this._hooks.push(() => { 
+    this._hooks.push(() => {
       const lo = Math.min(d.start, d.end), hi = Math.max(d.start, d.end);
       const over = this._bars.filter((b, i) => i !== this._draftIndex && Math.min(b.start, b.end) <= hi && Math.max(b.start, b.end) >= lo).map((b) => b.name);
+      if (!rangeFits(d, count)) { posInfo.textContent = rangeError(count); return; }
       posInfo.textContent = `LED ${d.start} → ${d.end} · ${hi - lo + 1} LEDs · fills from the green end towards the red end`
         + (over.length ? ` · shares LEDs with ${over.join(", ")}` : "");
     });
     form.append(this._card("1", "Where on the strip", "Drag the middle to move it, or either end to resize", [
       h("div", { class: "stage full" }, scroller), posInfo,
-      F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1 })),
-      F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1 })),
+      F("Begins at LED", I(d, "start", "num", { min: 0, max: count - 1, required: true })),
+      F("Ends at LED", I(d, "end", "num", { min: 0, max: count - 1, required: true })),
       h("div", { class: "rowx full" },
         h("button", { class: "btn", onclick: (e) => { e.preventDefault(); [d.start, d.end] = [d.end, d.start]; this._touch(true); } }, ic("flip", 15), "Flip direction"),
         h("button", { class: "btn", title: "Blink this range on the real strip so you can find it",
-          onclick: (e) => { e.preventDefault(); this.ws("identify", { entry_id: this._entry, leds: E.barLeds(E.normalizeBar(d)) }); } }, ic("find", 15), "Find on strip"),
+          onclick: (e) => { e.preventDefault(); if (rangeFits(d, count)) this.ws("identify", { entry_id: this._entry, leds: E.barLeds(d) }); } }, ic("find", 15), "Find on strip"),
         h("span", { class: "grow" }), zoomCtl),
     ]));
     if (zoom) {
@@ -3150,7 +3229,8 @@ class WledBarsPanel extends HTMLElement {
 
   _presetsDialog() {
     const draft = clone(this._presets || {});
-    let current = TEMPLATES[0];
+    let current = TEMPLATES[0], saving = false;
+    const error = h("div", { class: "sm", role: "alert" });
     const dlg = h("dialog");
     const draw = () => {
       dlg.innerHTML = "";
@@ -3176,11 +3256,17 @@ class WledBarsPanel extends HTMLElement {
         h("div", { class: "rowx", style: "padding:0 16px 16px" },
           custom ? h("button", { class: "link", onclick: () => { delete draft[key]; draw(); } }, "Reset this preset to built-in")
             : h("span", { class: "dim sm" }, "Built-in selection"),
-          h("span", { class: "grow" }),
+          error, h("span", { class: "grow" }),
           h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
           h("button", { class: "btn pri", onclick: async () => {
-            try { this._presets = (await this.ws("presets_save", { presets: draft })) || draft; } catch (_e) { this._presets = draft; }
-            dlg.close();
+            if (saving) return;
+            saving = true;
+            try {
+              this._presets = await this.ws("presets_save", { presets: draft });
+              dlg.close();
+            } catch (err) {
+              error.textContent = `Couldn’t save preset defaults. ${err?.message || "Try again."}`;
+            } finally { saving = false; }
           } }, "Save")));
     };
     dlg.addEventListener("close", () => dlg.remove());
@@ -3192,7 +3278,8 @@ class WledBarsPanel extends HTMLElement {
   // ----- device settings -----
 
   _settingsDialog() {
-    const st = clone(this._settings);
+    const base = this._config;
+    const st = clone(base.settings);
     const dlg = h("dialog");
     const draw = () => {
       dlg.innerHTML = "";
@@ -3232,7 +3319,7 @@ class WledBarsPanel extends HTMLElement {
           h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
           h("button", { class: "btn pri", onclick: async () => {
             st.segment = Number(st.segment);
-            await this._saveSettings(st);
+            if (!await this._saveEdit({ settings: st }, base)) { dlg.close(); return; }
             dlg.close();
             this._render();
           } }, "Save")),
@@ -3308,7 +3395,8 @@ class WledBarsPanel extends HTMLElement {
     if (!this._device) return;
     if (this._view === "edit" && this._draft && this._preview) {
       const bar = E.normalizeBar(this._draft);
-      const px = E.renderBar(bar, this._simCtx(bar, now));
+      const valid = rangeFits(this._draft, this._device.led_count);
+      const px = valid ? E.renderBar(bar, this._simCtx(bar, now)) : [];
       this._preview.pixels = px;
       this._preview.draw();
       this._histTick(now);
@@ -3320,12 +3408,9 @@ class WledBarsPanel extends HTMLElement {
       if (this._picker) {
         const n = this._device.led_count;
         const all = new Array(n).fill([0, 0, 0]);
-        E.barLeds(bar).forEach((idx, i) => { if (idx < n) all[idx] = px[i]; });
+        if (valid) E.barLeds(bar).forEach((idx, i) => { all[idx] = px[i]; });
         this._picker.pixels = all;
-        this._picker.sel = { start: bar.start, end: bar.end };
-        this._picker.ranges = this._bars
-          .filter((_b, i) => i !== this._draftIndex)
-          .map((b) => ({ start: b.start, end: b.end, label: b.name, color: this._picker.light ? "#9aa3b5" : "#566079" }));
+        this._picker.sel = valid ? { start: bar.start, end: bar.end } : null;
         this._picker.draw();
       }
       return;
@@ -3344,7 +3429,7 @@ class WledBarsPanel extends HTMLElement {
         const st = this._live.bars[bar.id];
         const visible = !!st?.visible;
         // a hidden bar is drawn faintly, as it would look, so the card is never just black
-        strip.pixels = visible ? E.barLeds(bar).map((idx) => live[idx] || [0, 0, 0])
+        strip.pixels = !rangeFits(bar, n) ? [] : visible ? E.barLeds(bar).map((idx) => live[idx] || [0, 0, 0])
           : E.renderBar(bar, { t: now, frac: st && st.state === "active" ? st.percent / 100 : 0.6, brightness: 1 });
         strip.c.style.opacity = visible ? "" : ".3";
         strip.draw();
@@ -3641,7 +3726,7 @@ class WledBarsCard extends HTMLElement {
     const standby = !L.enabled;
     const preview = standby && this._opt("preview");
     const selBar = this._sel && this._bars.find((b) => b.id === this._sel);
-    const selHidden = selBar && !L.bars[selBar.id]?.visible && !(preview && L.bars[selBar.id]?.would);
+    const selHidden = selBar && rangeFits(selBar, n) && !L.bars[selBar.id]?.visible && !(preview && L.bars[selBar.id]?.would);
     if (!texts && !preview && !selHidden) return; // nothing moves by itself
 
     if (this._strip) {
@@ -3649,7 +3734,7 @@ class WledBarsCard extends HTMLElement {
       if (preview) {
         for (const bar of this._bars) {
           const st = L.bars[bar.id];
-          if (!st?.would) continue;
+          if (!st?.would || !rangeFits(bar, n)) continue;
           const sk = this._sketch(bar, st, t);
           E.barLeds(bar).forEach((idx, i) => { if (idx < n) px[idx] = sk[i]; });
         }
@@ -3687,7 +3772,7 @@ class WledBarsCard extends HTMLElement {
       const pct = st && st.state === "active" ? st.percent : null;
       // colour: what is on the strip now, else what the bar would use
       let best = null, level = 0;
-      const pxs = on ? E.barLeds(bar).map((idx) => L.pixels[idx] || [0, 0, 0]) : this._sketch(bar, st && st.state === "active" && st.percent < 15 ? { ...st, percent: 15 } : st, 0);
+      const pxs = !rangeFits(bar, n) ? [] : on ? E.barLeds(bar).map((idx) => L.pixels[idx] || [0, 0, 0]) : this._sketch(bar, st && st.state === "active" && st.percent < 15 ? { ...st, percent: 15 } : st, 0);
       for (const p of pxs) { const lv = Math.max(p[0], p[1], p[2]); if (lv > level) { level = lv; best = p; } }
       const k = best ? 255 / Math.max(120, level) : 1; // a swatch should be readable even when the strip is dim
       row.el.style.setProperty("--c", best ? `rgb(${best.map((v) => Math.min(255, Math.round(v * k))).join(",")})` : "#667");

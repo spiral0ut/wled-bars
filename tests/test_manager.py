@@ -12,6 +12,7 @@ import pathlib
 import socket
 import sys
 import types
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import ClientSession, web
@@ -131,15 +132,26 @@ class Hass:
         self._states = {}
         self._cbs = []
         self.states = self
+        self.bus = self
+        self._events = {}
 
     def get(self, entity_id):
         return self._states.get(entity_id)
 
     def set(self, entity_id, state, attributes=None):
-        self._states[entity_id] = State(str(state), attributes)
+        state = self._states[entity_id] = State(str(state), attributes)
         for ids, cb in self._cbs:
             if entity_id in ids:
-                cb(None)
+                cb(types.SimpleNamespace(data={"entity_id": entity_id, "new_state": state}))
+
+    def async_listen(self, name, cb):
+        listeners = self._events.setdefault(name, [])
+        listeners.append(cb)
+        return lambda: listeners.remove(cb)
+
+    def fire(self, name, entity):
+        for cb in self._events.get(name, []):
+            cb(types.SimpleNamespace(data={"entity_id": entity}))
 
     def track(self, ids, cb):
         item = (ids, cb)
@@ -176,6 +188,8 @@ class FakeWled:
     async def post(self, request):
         body = await request.json()
         self.posts.append(body)
+        if not self.on and body.get("on") and body.get("seg"):
+            return web.Response(status=400, text="Power on before painting individual LEDs")
         if "on" in body:
             self.on = body["on"]
         for seg in body.get("seg", []):
@@ -237,7 +251,8 @@ async def main():
     assert fake.on is True, "strip should be switched on when a bar appears"
     assert fake.leds[10:15] == [(255, 0, 0)] * 5 and fake.leds[15:20] == [(0, 0, 0)] * 5, fake.leds[8:22]
     assert fake.leds[9] is None and fake.leds[20] is None, "LEDs outside the bar must be untouched"
-    first = fake.posts[0]["seg"][0]["i"]
+    assert fake.posts[0] == {"on": True}
+    first = fake.posts[1]["seg"][0]["i"]
     assert first == [10, 15, "FF0000", 15, 20, "000000"], first
     print("ok json paint + range compression:", first)
 
@@ -665,12 +680,149 @@ async def main():
     print("ok per-bar entities")
 
     await mgr.async_stop()
+    await review_regressions(port, fake, bar)
     await SESSION["s"].close()
     await runner.cleanup()
     assert wled.compress_changes({i: (1, 2, 3) for i in range(200)}) == [[0, 200, "010203"]]
     big = wled.compress_changes({i: (i % 256, 0, 0) for i in range(300)})
     assert all(len(c) <= wled.JSON_MAX_ITEMS for c in big) and sum(len(c) for c in big) == 600
     print("all manager tests passed")
+
+
+async def review_regressions(port, fake, bar):
+    """Drive individual frames to exercise exact event orderings and storage failures."""
+    hass = Hass()
+    target = Entry(f"127.0.0.1:{port}")
+    target.entry_id = "review"
+    mgr = manager_mod.BarsManager(hass, target)
+    await mgr._health()
+    await mgr.async_save([bar], {})
+    rev = mgr.revision
+    writes = await asyncio.gather(
+        mgr.async_save([dict(bar, name="First")], None, rev),
+        mgr.async_save([dict(bar, name="Second")], None, rev), return_exceptions=True)
+    assert sum(isinstance(r, manager_mod.ConfigConflict) for r in writes) == 1
+    assert mgr.bars[0]["name"] == "First"
+    await asyncio.gather(mgr.async_control({"brightness": 42}), mgr.async_control(bar_id=bar["id"], enabled=False))
+    assert mgr.settings["brightness"] == 42 and not mgr.bars[0]["enabled"]
+    before = mgr.configuration()
+    with patch.object(mgr._store, "async_save", side_effect=OSError("storage full")):
+        try:
+            await mgr.async_save([], {}, mgr.revision)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("a failed write must be reported")
+    assert mgr.configuration() == before
+    print("ok conflicting revisions, atomic controls and failed persistence")
+
+    # JSON addresses the selected segment relative to its first LED.
+    mgr.segments.append({"id": 1, "start": 30, "stop": 40, "name": "Short"})
+    await mgr.async_save([dict(bar, start=9, end=9)], {**mgr.settings, "segment": 1})
+    assert mgr.led_count == 10 and mgr.describe()["strip_count"] == 40
+    for a, b in [(9, 10), (10, 10), (-1, 3), (2.5, 3)]:
+        try:
+            await mgr.async_save([dict(bar, start=a, end=b)], None)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid endpoints {a}, {b}")
+    hass.set("sensor.progress", 100)
+    mgr._apply([dict(bar, start=8, end=10)], mgr.settings)
+    await mgr._frame()
+    assert mgr.runtimes[0].status["why"] == "range" and not mgr._last_frame
+    await mgr.async_control({"brightness": 100})
+    assert mgr.bars[0]["end"] == 10
+    await mgr.async_save([dict(bar, start=9, end=8)], None)
+    assert mgr.bars[0]["end"] == 8
+    await mgr.async_save([dict(bar, start=39, end=39)], {**mgr.settings, "transport": "ddp"})
+    assert mgr.led_count == 40
+    print("ok single, reversed, partial and legacy ranges; segment-relative bounds")
+
+    await mgr.async_save([bar], {**mgr.settings, "segment": 0, "transport": "json", "idle": "black"})
+    await mgr._frame()
+    assert fake.frozen
+    await mgr.async_control(bar_id=bar["id"], enabled=False)
+    await mgr._frame()
+    assert fake.frozen and fake.leds[10:20] == [(0, 0, 0)] * 10 and mgr._sent == {}
+    await mgr.async_control({"idle": "release"})
+    with patch.object(mgr.client, "release", new=AsyncMock(side_effect=wled.WledError("offline"))):
+        await mgr._frame()
+    assert mgr._owned_segment == 0
+    await mgr._frame()
+    assert not fake.frozen and mgr._owned_segment is None
+    await mgr.async_control({"idle": "black"}, bar_id=bar["id"], enabled=True)
+    await mgr._frame()
+    await mgr.async_control(bar_id=bar["id"], enabled=False)
+    await mgr._frame()
+    await mgr.async_control({"segment": 1})
+    await mgr._frame()
+    assert fake.posts[-1] == {"seg": [{"id": 0, "frz": False}]}
+    await mgr.async_control({"segment": 0}, bar_id=bar["id"], enabled=True)
+    await mgr._frame()
+    await mgr.async_control({"transport": "ddp"}, bar_id=bar["id"], enabled=False)
+    await mgr._frame()
+    assert not fake.frozen
+    print("ok release after idle black, segment and transport changes, and retry")
+
+    timed = dict(bar, source={"type": "timer", "entity": "timer.review", "invert": True},
+                 on_complete={"effect": "flash", "color": "#00ff00", "duration": 6, "then": "hide"},
+                 visibility={"hide_when_idle": True, "hide_at_zero": True})
+    await mgr.async_save([timed], {**mgr.settings, "transport": "json"})
+    rt = mgr.runtimes[0]
+    utc = manager_mod.dt_util.utcnow()
+    attrs = {"duration": "0:01:00", "finishes_at": (utc + timedelta(seconds=1)).isoformat()}
+    def evaluate():
+        return mgr._evaluate(rt, manager_mod.time.monotonic(), utc, 1.0)
+    for finish_first in (False, True):
+        hass.set("timer.review", "active", attrs)
+        assert evaluate() is not None
+        if finish_first:
+            hass.fire("timer.finished", "timer.review")
+            assert evaluate()["complete_age"] < 1
+        hass.set("timer.review", "idle")
+        if not finish_first:
+            assert evaluate() is None
+            hass.fire("timer.finished", "timer.review")
+        assert evaluate()["complete_age"] < 1 and rt.status["visible"]
+        rt.helper_finished -= 5
+        assert evaluate() is not None
+        rt.helper_finished -= 2
+        assert evaluate() is None
+    hass.set("timer.review", "active", attrs)
+    hass.set("timer.review", "idle")
+    hass.fire("timer.cancelled", "timer.review")
+    hass.fire("timer.finished", "timer.someone_else")
+    assert evaluate() is None
+    hass.fire("timer.finished", "timer.review")
+    hass.set("timer.review", "active", attrs)
+    assert evaluate()["complete_age"] is None
+    print("ok six-second timer completion, either event order, cancellation and restart")
+
+    ruled = dict(bar, color={"mode": "solid", "stops": [{"pos": 0, "color": "#0000ff"}]},
+                 rules=[{"source": "entity", "entity": "input_boolean.hot", "op": "==",
+                         "value": "on", "effect": "solid", "color": "#ff0000"}])
+    await mgr.async_save([ruled], None)
+    hass.set("input_boolean.hot", "off")
+    await mgr._frame()
+    assert mgr.runtimes[0].status["color"] == "0000ff"
+    SENT.clear()
+    hass.set("input_boolean.hot", "on")
+    await mgr._frame()
+    status = mgr.runtimes[0].status
+    assert status["percent"] == 100 and status["color"] == "ff0000", status
+    assert f"{manager_mod.SIGNAL_STATUS}_review" in SENT
+    SENT.clear()
+    await mgr._frame()
+    assert not SENT
+    print("ok color-only sensor update and stable-frame filtering")
+
+    await mgr.async_control(bar_id=bar["id"], enabled=False)
+    await mgr._frame()
+    assert fake.frozen
+    await mgr.async_stop()
+    assert not fake.frozen and fake.posts[-1] == {"seg": [{"id": 0, "frz": False}]}
+    print("ok unloading releases an idle black segment")
 
 
 if __name__ == "__main__":
