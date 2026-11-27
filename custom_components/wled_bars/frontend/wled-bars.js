@@ -3480,7 +3480,8 @@ class WledBarsPanel extends HTMLElement {
       if (this._picker) {
         const n = this._device.led_count;
         // Once the strip is previewing this draft, it has the exact colours beneath it.
-        const previewing = this._onStrip && this._live.overlays?.some(layer => layer.preview === bar.id);
+        const draftId = this._draftIndex < 0 ? "__draft__" : bar.id;
+        const previewing = this._onStrip && this._live.overlays?.some(layer => layer.preview === draftId);
         const all = previewing ? this._live.pixels.slice(0, n) : new Array(n).fill([0, 0, 0]);
         if (valid && !previewing) E.barLeds(bar).forEach((idx, i) => { all[idx] = px[i]; });
         this._picker.pixels = all;
