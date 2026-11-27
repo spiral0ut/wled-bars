@@ -356,6 +356,9 @@ def is_animated(bar):
 def _finish(pixels, bright):
     out = []
     for c in pixels:
+        if c is None:
+            out.append(None)
+            continue
         out.append(
             (
                 int(clamp(c[0] * bright, 0.0, 255.0) + 0.5),
@@ -392,7 +395,7 @@ def render_bar(bar, ctx):
     ctx keys: t (seconds), frac (0..1), brightness (0..1 global multiplier),
     rule (dict|None), markers (list of frac|None aligned with bar.markers),
     peak (frac|None), complete_age (seconds|None), unavailable (bool).
-    Returns a list of (r, g, b) ints in logical order (index 0 = bar start).
+    Returns RGB tuples in logical order, or None where a lower bar shows through.
     """
     n = bar_length(bar)
     t = num(ctx.get("t"), 0.0)
@@ -555,21 +558,25 @@ def render_bar(bar, ctx):
             if ticks["over"]:
                 lit_c = tick_color
 
+        painted = track["mode"] != "transparent" or cov > 0 or d in tick_set or rule_all
         if rule_all:
             c = scale(base, rule_level)
         else:
             c = mix(tr, scale(lit_c, rule_level), cov)
             if d == peak_d and cov < 1.0:
                 c = peak_color
+                painted = True
             for md, mc, ml in marker_list:
                 if d == md:
                     c = mix(c, mc, ml)
+                    painted = painted or ml > 0
             if tip_on and tip_lo <= d < tip_hi and d < mh:
                 tl = (d - tip_lo + 1.0) / tip_k if tip["taper"] else 1.0
                 tc = mix(base, WHITE, 0.6) if tip["auto"] else tip_color
                 off = c if tip["off"] == "under" else BLACK
                 c = mix(off, scale(tc, tl), tip_level)
-        pixels.append(c)
+                painted = painted or tip["off"] != "under" or tip_level > 0
+        pixels.append(c if painted else None)
 
     cap = caps["end"]
     cap_c = scale(
