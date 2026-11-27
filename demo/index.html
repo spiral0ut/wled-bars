@@ -11,6 +11,7 @@
      Serve the repository root (python3 -m http.server) and open /demo/. -->
 <script type="module">
 import * as E from "../custom_components/wled_bars/frontend/engine.js";
+import { layoutBars } from "../custom_components/wled_bars/frontend/arrangement-dialogs.js";
 import { conditionsOk, distanceInfo, mediaInfo, ratioInfo, eventInfo } from "../custom_components/wled_bars/frontend/wled-bars.js?v=demo";
 
 // ?leds=165 tries a long strip, ?theme=light a light Home Assistant theme
@@ -46,19 +47,19 @@ let bars = [
     tip: { enabled: false }, track: { mode: "color", color: "#ffffff", level: 3 },
     smoothing: 2 },
 ].map(E.normalizeBar);
-let settings = { enabled: true, brightness: 100, transport: "json", segment: 0, fps: 0, auto_power: true, idle: "release",
+let settings = { enabled: true, brightness: 100, transport: "json", segment: 0, fps: 0, auto_power: true, idle: "release", layouts: [], map_runs: null, active_layout: "",
   night: { mode: "off", start: "22:00", end: "07:00", entity: "", level: 20 } };
 let preview = null;
 let flash = null; // {color, effect, until, t0}
 let presets = {};
 let rev = 1; // goes up on every save, like the real integration
-let device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, online: true,
+let device = { entry_id: "demo", name: "Desk strip (demo)", host: "192.168.1.50", led_count: LEDS, strip_count: LEDS, segments_known: true, online: true,
   segments: [{ id: 0, start: 0, stop: LEDS, name: "" }] };
 // a second, shorter strip to copy bars to; the globals above always hold the strip being looked at
 const stores = {
   demo: null,
   shelf: {
-    device: { entry_id: "shelf", name: "Shelf strip (demo)", host: "192.168.1.51", led_count: 30, online: true, segments: [{ id: 0, start: 0, stop: 30, name: "" }] },
+    device: { entry_id: "shelf", name: "Shelf strip (demo)", host: "192.168.1.51", led_count: 30, strip_count: 30, segments_known: true, online: true, segments: [{ id: 0, start: 0, stop: 30, name: "" }] },
     bars: [{ id: "s1", name: "Temperature", start: 0, end: 14, kind: "temperature", source: { entity: "sensor.living_room_temperature", min: 60, max: 85 } }].map(E.normalizeBar),
     settings: { ...settings }, rev: 1,
   },
@@ -167,6 +168,15 @@ const hass = {
     if (type === "presets_get") return presets;
     if (type === "presets_save") { presets = msg.presets; return presets; }
     if (type === "get") return structuredClone(store(msg.entry_id));
+    if (type === "activate_layout") {
+      const data = store(msg.entry_id);
+      const layout = data.settings.layouts.find(l => l.id === msg.layout_id);
+      if (!layout) throw new Error("This layout no longer exists.");
+      const byId = new Map(data.bars.map(b => [b.id, b]));
+      return hass.callWS({ type: "wled_bars/save", entry_id: msg.entry_id, expected_rev: data.rev,
+        bars: layoutBars(data.bars, layout).map(b => ({ ...byId.get(b.id), enabled: b.enabled })),
+        settings: { ...data.settings, active_layout: layout.id } });
+    }
     if (type === "save") {
       if (msg.expected_rev !== store(msg.entry_id).rev) throw { code: "config_conflict", message: "Strip changed" };
       if (msg.entry_id !== current) {

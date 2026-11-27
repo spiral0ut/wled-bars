@@ -29,6 +29,7 @@ class BarsEntity(Entity):
         )
 
     async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -95,17 +96,22 @@ def sync_bar_entities(
     wanted: Callable[[dict], bool] = lambda bar: True,
 ) -> None:
     """Keep one entity per bar: add for new bars, remove for deleted ones."""
+    sync_entities(hass, entry, async_add_entities, factory,
+                  lambda manager: [bar["id"] for bar in manager.bars if wanted(bar)])
+
+
+def sync_entities(hass, entry, async_add_entities, factory, get_ids) -> None:
+    """Mirror saved bar or layout IDs to entities with stable registry IDs."""
     manager = hass.data[DOMAIN][entry.entry_id]
-    known: dict[str, BarEntity] = {}
+    known = {}
 
     @callback
     def sync() -> None:
-        current = [bar["id"] for bar in manager.bars if wanted(bar)]  # in list order
-        fresh = [factory(manager, bar_id) for bar_id in current if bar_id not in known]
-        for entity in fresh:
-            known[entity.bar_id] = entity
+        current = get_ids(manager)
+        fresh = {key: factory(manager, key) for key in current if key not in known}
+        known.update(fresh)
         if fresh:
-            async_add_entities(fresh)
+            async_add_entities(list(fresh.values()))
         registry = er.async_get(hass)
         for bar_id in [b for b in known if b not in current]:
             entity = known.pop(bar_id)

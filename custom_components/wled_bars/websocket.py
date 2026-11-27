@@ -44,6 +44,22 @@ def ws_get(hass, connection, msg) -> None:
 
 @websocket_api.require_admin
 @websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/activate_layout", vol.Required("entry_id"): str, vol.Required("layout_id"): str}
+)
+@websocket_api.async_response
+async def ws_activate_layout(hass, connection, msg) -> None:
+    mgr = _manager(hass, connection, msg)
+    if mgr:
+        try:
+            await mgr.async_activate_layout(msg["layout_id"])
+        except ValueError as err:
+            connection.send_error(msg["id"], "invalid_layout", str(err))
+        else:
+            connection.send_result(msg["id"], mgr.configuration())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
     {
         vol.Required("type"): f"{DOMAIN}/save",
         vol.Required("entry_id"): str,
@@ -196,6 +212,6 @@ async def ws_presets_save(hass, connection, msg) -> None:
 def async_register_websocket(hass: HomeAssistant) -> None:
     for command in (
         ws_version, ws_devices, ws_get, ws_save, ws_preview, ws_identify, ws_flash, ws_control, ws_subscribe,
-        ws_presets_get, ws_presets_save,
+        ws_presets_get, ws_presets_save, ws_activate_layout,
     ):
         websocket_api.async_register_command(hass, command)

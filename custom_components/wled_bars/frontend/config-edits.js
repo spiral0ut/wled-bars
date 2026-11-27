@@ -7,6 +7,7 @@ function same(a, b) {
   return keys.length === Object.keys(b).length && keys.every(k => Object.hasOwn(b, k) && same(a[k], b[k]));
 }
 const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+export const newId = () => Array.from(crypto.getRandomValues(new Uint32Array(2)), n => n.toString(16).padStart(8, "0")).join("");
 
 function conflict(field) {
   throw new Error(`${field} changed elsewhere. Reopen it to review the latest version.`);
@@ -18,7 +19,10 @@ function mergeValue(before, wanted, latest, field) {
   if (record(before) && record(wanted) && record(latest)) {
     const merged = { ...latest };
     for (const key of new Set([...Object.keys(before), ...Object.keys(wanted)])) {
-      const value = mergeValue(before[key], wanted[key], latest[key], field);
+      const collections = (key === "layouts" || key === "map_runs") &&
+        [before[key], wanted[key], latest[key]].every(Array.isArray);
+      const value = collections ? mergeBars(before[key], wanted[key], latest[key])
+        : mergeValue(before[key], wanted[key], latest[key], field);
       if (value === undefined) delete merged[key];
       else merged[key] = value;
     }
@@ -69,8 +73,7 @@ export async function saveConfigEdit(ws, base, changes) {
   const wanted = { ...changes };
   if (wanted.bars) wanted.bars = wanted.bars.map(bar => {
     if (bar.id) return bar;
-    const id = Array.from(crypto.getRandomValues(new Uint32Array(2)), n => n.toString(16).padStart(8, "0")).join("");
-    return { ...bar, id };
+    return { ...bar, id: newId() };
   });
   for (let attempt = 0; attempt < 3; attempt++) {
     const current = await ws("get", { entry_id: entry });

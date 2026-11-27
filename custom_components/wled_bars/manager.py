@@ -19,6 +19,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import engine
+from .arrangements import apply_layout, validate_layouts, validate_map
 from .const import DEFAULT_SETTINGS, DOMAIN, SIGNAL_SETTINGS, SIGNAL_STATUS
 from .wled import WledClient, WledError
 
@@ -363,8 +364,25 @@ class BarsManager:
                 bars = [dict(b, enabled=enabled) if b["id"] == bar_id else b for b in self.bars]
             await self._save(bars, {**self.settings, **settings} if settings else None)
 
+    async def async_activate_layout(self, layout_id: str) -> None:
+        """Apply the latest saved layout and persist all its switches in one write."""
+        async with self._save_lock:
+            layout = next((item for item in self.settings["layouts"] if item["id"] == layout_id), None)
+            if layout is None:
+                raise ValueError("This layout no longer exists.")
+            await self._save(apply_layout(self.bars, layout), {**self.settings, "active_layout": layout_id})
+
     async def _save(self, bars, settings) -> None:
-        settings = self.settings if settings is None else engine._merge(DEFAULT_SETTINGS, settings)
+        if settings is None:
+            settings = self.settings
+        else:
+            # Older clients do not send arrangements with their device settings.
+            keep = {key: self.settings[key] for key in ("layouts", "active_layout", "map_runs")}
+            settings = engine._merge(DEFAULT_SETTINGS, {**keep, **settings})
+            if settings["layouts"] != self.settings["layouts"]:
+                validate_layouts(settings["layouts"])
+            if settings["map_runs"] is not None and settings["map_runs"] != self.settings["map_runs"]:
+                validate_map(settings["map_runs"], self._strip_count)
         if bars is None:
             bars = self.bars
         else:
@@ -382,6 +400,10 @@ class BarsManager:
                     limit = f"0–{capacity - 1}" if capacity else "the available LED range"
                     raise ValueError(f"{raw.get('name', 'Bar')}: choose whole LED numbers in {limit}.")
             bars = self._normalize(bars)
+        if settings["active_layout"]:
+            active = next((item for item in settings["layouts"] if item["id"] == settings["active_layout"]), None)
+            if active is None or apply_layout(bars, active) != bars:
+                settings = {**settings, "active_layout": ""}
         manual = self._stored()["manual"]
         data = {"bars": bars, "settings": settings,
                 "manual": {b["id"]: manual[b["id"]] for b in bars if b["id"] in manual}}
@@ -598,7 +620,7 @@ class BarsManager:
         old_shape = (self._strip_count, self.segments, self._segments_known)
         self._strip_count = int((info.get("leds") or {}).get("count") or self._strip_count or 30)
         self.name = info.get("name") or self.name
-        if not self.online or rebooted or not self.segments or self.settings["transport"] == "json":
+        if not self.online or rebooted or not self.segments or self._listeners or self.settings["transport"] == "json":
             try:
                 state = await self.client.state()
                 self.segments = [

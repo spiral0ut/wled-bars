@@ -21,6 +21,9 @@ DEFAULT_SETTINGS = {
     "fps": 0,  # 0 = automatic (5 for json, 25 for ddp)
     "auto_power": True,
     "idle": "release",  # release (give LEDs back to WLED) | black
+    "layouts": [],  # named snapshots of bar IDs, stacking order and enabled switches
+    "active_layout": "",
+    "map_runs": None,  # follow WLED segments until the user saves a custom map
     "night": {
         "mode": "off",  # off | schedule | entity
         "start": "22:00",

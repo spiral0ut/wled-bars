@@ -32,7 +32,7 @@ from .websocket import async_register_websocket
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SWITCH, Platform.NUMBER, Platform.SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.NUMBER, Platform.SENSOR, Platform.SCENE]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _SHARED = f"{DOMAIN}_shared"
 
