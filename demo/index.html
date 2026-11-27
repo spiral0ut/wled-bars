@@ -94,15 +94,26 @@ setInterval(() => {
   const t = performance.now() / 1000;
   const leds = new Array(LEDS).fill([0, 0, 0]);
   const status = [];
+  const overlays = [];
   const getState = (id) => (states[id] ? states[id].state : null);
-  const draw = (bar, frac, extra = {}) => {
+  const draw = (bar, frac, layer, extra = {}) => {
     const value = E.fracToValue(bar, frac);
     const markers = bar.markers.map((m) => {
       const mv = m.type === "entity" ? E.num(getState(m.entity), null) : E.num(m.value, null);
       return mv === null ? null : E.valueToFrac(bar, mv);
     });
     const px = E.renderBar(bar, { t, frac, brightness: settings.brightness / 100, rule: E.pickRule(bar, value, frac * 100, getState), markers, ...extra });
-    E.barLeds(bar).forEach((idx, i) => { if (idx < LEDS) leds[idx] = px[i]; });
+    if (bar.track.mode === "transparent") layer.painted = [];
+    for (let idx = Math.min(bar.start, bar.end); idx <= Math.max(bar.start, bar.end) && idx < LEDS; idx++) {
+      const pixel = px[Math.abs(idx - bar.start)];
+      if (pixel === null) continue;
+      leds[idx] = pixel;
+      if (layer.painted) {
+        const last = layer.painted.at(-1);
+        if (last && last[1] === idx - 1) last[1] = idx;
+        else layer.painted.push([idx, idx]);
+      }
+    }
   };
   for (const bar of bars) {
     const v = E.num(getState(bar.source.entity), null);
@@ -122,17 +133,24 @@ setInterval(() => {
     const visible = allowed && !(preview && preview.bar.id === bar.id);
     const why = allowed ? undefined : bar.enabled && !condsOk ? "conditions" : "disabled";
     const would = !settings.enabled && bar.enabled && condsOk ? true : undefined; // what the Bars switch is holding back
-    status.push({ id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v, visible: allowed, why, would });
-    if (visible) draw(bar, shown[bar.id], { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
+    const layer = { id: bar.id, state: "active", percent: Math.round(target * 1000) / 10, value: v,
+      visible, why: preview?.bar.id === bar.id ? "preview" : why, would };
+    status.push(layer);
+    if (visible) draw(bar, shown[bar.id], layer, { complete_age: fullSince[bar.id] !== undefined ? t - fullSince[bar.id] : null });
   }
-  if (preview) draw(preview.bar, preview.frac);
+  if (preview) {
+    const layer = { name: preview.bar.name + " (preview)", preview: preview.bar.id, start: preview.bar.start, end: preview.bar.end };
+    overlays.push(layer);
+    draw(preview.bar, preview.frac, layer);
+  }
   if (flash && Date.now() < flash.until) {
     const level = flash.effect === "pulse" ? 0.1 + 0.9 * (0.5 - 0.5 * Math.cos(((t - flash.t0) / 1.2) * 2 * Math.PI)) : 1;
     const rgb = [1, 3, 5].map((i) => Math.round(parseInt(flash.color.substr(i, 2), 16) * level));
     leds.fill(rgb);
+    overlays.push({ name: "Strip flash", painted: [[0, LEDS - 1]] });
   }
   const hex = leds.map((p) => p.map((c) => c.toString(16).padStart(2, "0")).join("")).join("");
-  for (const cb of listeners) cb({ leds: hex, online: true, enabled: settings.enabled, brightness: settings.brightness, rev, bars: status });
+  for (const cb of listeners) cb({ leds: hex, online: true, enabled: settings.enabled, brightness: settings.brightness, rev, frame_rev: rev, bars: status, overlays });
 }, 80);
 
 const hass = {

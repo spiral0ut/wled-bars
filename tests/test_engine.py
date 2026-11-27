@@ -86,6 +86,24 @@ def test_colors_rules_markers():
     assert E.compare("on", "==", "ON") and E.compare("21.5", ">", 21) and not E.compare("x", ">", 1)
 
 
+def test_transparent_track():
+    b = bar(track={"mode": "transparent"}, brightness=0)
+    assert E.render_bar(b, {"frac": 0.25}) == [(0, 0, 0)] * 3 + [None] * 7
+    b = bar(track={"mode": "transparent"}, ticks={"every": 50}, peak={"enabled": True},
+            markers=[{"effect": "solid"}], caps={"end": {"count": 1}})
+    frame = E.render_bar(b, {"frac": 0, "peak": 0.25, "markers": [0.75]})
+    assert frame[2] and frame[4] and frame[6] and frame[9] and frame[3] is None, frame
+    assert None not in E.render_bar(b, {"frac": 0, "unavailable": True})
+    rule = {"color": "#ff0000", "use_color": True, "effect": "blink", "period": 1, "scope": "all"}
+    assert E.render_bar(b, {"frac": 0, "t": 0.6, "rule": rule}) == [(0, 0, 0)] * 10
+    b = bar(track={"mode": "transparent"}, tip={"enabled": True, "effect": "blink", "count": 1,
+            "position": "ahead", "off": "under", "period": 1})
+    assert E.render_bar(b, {"frac": 0.3, "t": 0.1})[3] is not None
+    assert E.render_bar(b, {"frac": 0.3, "t": 0.6})[3] is None
+    b["tip"]["off"] = "dark"
+    assert E.render_bar(b, {"frac": 0.3, "t": 0.6})[3] == (0, 0, 0)
+
+
 def test_parity():
     out = subprocess.run(
         ["node", str(ROOT / "tests" / "parity.mjs")], capture_output=True, text=True, check=True
@@ -100,6 +118,9 @@ def test_parity():
         frame = E.render_bar(nb, case["ctx"])
         assert len(frame) == len(case["frame"]), f"case {i}: length"
         for a, b in zip(frame, case["frame"]):
+            if a is None or b is None:
+                assert a is None and b is None, f"case {i}: paint coverage differs"
+                continue
             diff = max(abs(a[k] - b[k]) for k in range(3))
             worst = max(worst, diff)
             assert diff <= 1, f"case {i}: {a} vs {b}\n{json.dumps(case['bar'])}\n{case['ctx']}"

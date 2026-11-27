@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.8.2).** In use on real hardware, but young: the render engine, frame logic and editor are covered by tests (see [Testing](#testing)), while the Home Assistant entity wiring is only tested against stubs. Expect rough edges.
+> **Status: early build (0.9.0).** In use on real hardware. Tests cover the render engine, frame logic and editor. The Home Assistant entity tests use stubs. See [Testing](#testing).
 
 ## What a bar can do
 
@@ -37,6 +37,8 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 ## Using it
 
 - **Strip overview.** Each bar has a coloured line beneath its LEDs, labelled with its name and direction. Overlapping lines or names stack in card order. Click or tap a line or name to edit that bar, even when it is switched off or waiting for its schedule. The placement editor stacks the other bars’ names the same way while you drag the selected range.
+- **Show bars underneath.** Open the upper bar’s *Unfilled LEDs* extra and choose *Show bars underneath*. Its empty LEDs reveal the next bar in the stack. Filled LEDs, scale marks, lit tips and whole-bar alerts still take priority. For example, a short red progress bar can run over a full blue background bar.
+- **Inspect LED.** In the strip overview, turn on *Inspect LED* and tap a dot or enter its number. The inspector shows the colour WLED Bars sends, which bar supplies it, and why other bars at that position are covered, passing through or hidden. A live draft, identify flash or notification flash appears when it takes over. For ordinary linear JSON segments the inspector gives both the segment LED and its physical strip number.
 - **Saving across tabs.** Undo applies to the strip where the edit was made. Independent changes are combined. If two editors change the same field differently, the second editor keeps its draft and asks you to review the saved version.
 - **Three basics, then add-ons:** every bar starts with just *Where on the strip*, *What it shows* and *Colour*. Everything else (flashing tip, begin & end markers, scale marks, target markers, motion, alerts, finish celebration, show-only-when…) is an add-on you attach from the *Add extras* tray and can remove again. Templates come with the add-ons that suit them already attached.
 - **Range:** for a sensor, set the reading that means an empty bar and the reading that means a full bar; the editor tells you what the current reading lights up, and the preview follows the live value until you drag *Simulate*.
@@ -165,7 +167,7 @@ tests/                 engine tests, Python/JS parity, manager vs. fake WLED
 
 ## Testing
 
-`node --test tests/strip-labels.mjs tests/config-edits.mjs` checks the strip labels at desktop and phone widths, card order for overlapping ranges, and editing the same or different strips from multiple panels.
+`node --test tests/strip-labels.mjs tests/config-edits.mjs tests/led-inspect.mjs` checks strip labels at desktop and phone widths, editing from multiple panels, LED ownership and segment addressing.
 
 ```bash
 python3 tests/test_engine.py

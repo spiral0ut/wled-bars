@@ -3,10 +3,11 @@
 // engine as the backend (engine.js mirrors engine.py).
 // Load matching frontend modules when Home Assistant switches release versions.
 const revision = new URL(import.meta.url).search;
-const [E, { layoutStripLabels }, { saveConfigEdit }] = await Promise.all([
+const [E, { layoutStripLabels }, { saveConfigEdit }, { inspectLed, ledAddress, paintsLed }] = await Promise.all([
   import("./engine.js" + revision),
   import("./strip-labels.js" + revision),
   import("./config-edits.js" + revision),
+  import("./led-inspect.js" + revision),
 ]);
 
 const DOMAIN = "wled_bars";
@@ -429,6 +430,7 @@ export function eventInfo(source, states, now = Date.now()) {
 // What a bar is doing right now, in plain words: {tone, text}.
 function barStatus(bar, i, o) {
   const st = o.live[bar.id];
+  if (st?.why === "preview") return { tone: "", text: "Replaced by the strip preview" };
   if (st?.why === "range") return { tone: "warn", text: "Outside the LED range · edit its position" };
   const states = o.states || {};
   const nm = (id) => states[id]?.attributes?.friendly_name || id;
@@ -440,10 +442,13 @@ function barStatus(bar, i, o) {
   if (!o.enabled && st.would) return { tone: "would", text: st.state === "unavailable" ? "Would show the offline warning" : "Would show" };
   if (st.visible) {
     if (st.state === "unavailable") return { tone: "warn", text: "Showing the offline warning" };
-    const mine = E.barLeds(bar);
+    const mine = E.barLeds(bar).filter(led => !st.painted || paintsLed(st, led));
+    if (!mine.length) return { tone: "", text: "Unfilled · showing bars underneath" };
     const cover = new Map();
     o.bars.forEach((b, k) => {
-      if (k > i && o.live[b.id]?.visible) for (const led of E.barLeds(b)) cover.set(led, b.name);
+      const upper = o.live[b.id];
+      if (k <= i || !upper?.visible) return;
+      for (const led of E.barLeds(b)) if (!upper.painted || paintsLed(upper, led)) cover.set(led, b.name);
     });
     const hit = mine.filter((led) => cover.has(led));
     if (!hit.length) return { tone: "yes", text: "Showing" };
@@ -674,7 +679,7 @@ const ADDONS = [
   { id: "caps", icon: "caps", title: "Begin & end markers", hint: "Always-on LEDs showing where the bar starts and stops",
     active: (d) => d.caps.start.count > 0 || d.caps.end.count > 0,
     add: (d) => { d.caps.start.count = 1; d.caps.end.count = 1; }, remove: (d) => { d.caps.start.count = 0; d.caps.end.count = 0; } },
-  { id: "track", icon: "track", title: "Ghost of the unlit part", hint: "Faintly light the empty part of the bar",
+  { id: "track", icon: "track", title: "Unfilled LEDs", hint: "Show bars underneath or give empty LEDs a colour",
     active: (d) => d.track.mode !== "off", add: (d) => { d.track.mode = "dim"; }, remove: (d) => { d.track.mode = "off"; } },
   { id: "ticks", icon: "ticks", title: "Scale marks", hint: "Small marks every 10–50 % along the bar",
     active: (d) => Number(d.ticks.every) > 0, add: (d) => { d.ticks.every = 25; }, remove: (d) => { d.ticks.every = 0; } },
@@ -1016,6 +1021,15 @@ class StripView {
     }
     g.shadowBlur = 0;
 
+    if (Number.isInteger(this.focusLed) && this.focusLed >= 0 && this.focusLed < L.n) {
+      const [x, y] = pos(this.focusLed);
+      g.beginPath();
+      g.arc(x, y, L.size * 0.44, 0, Math.PI * 2);
+      g.strokeStyle = light ? "#181818" : "#fff";
+      g.lineWidth = 2;
+      g.stroke();
+    }
+
     for (const rg of this.ranges) {
       const lo = Math.min(rg.start, rg.end), hi = Math.max(rg.start, rg.end);
       g.fillStyle = rg.color || "#5b8cff";
@@ -1087,6 +1101,12 @@ const CSS = `
 .stage canvas{display:block;width:100%}
 .strip-overview,.strip-labels{position:relative}
 .strip-overview > canvas{position:absolute;top:0;left:0}
+.led-inspect{margin-top:10px;border-top:1px solid var(--wb-line);padding-top:10px}
+.led-inspect input{width:6em}
+.led-inspect ul{list-style:none;padding:0;margin:6px 0 0}
+.led-inspect li{display:flex;gap:8px;flex-wrap:wrap;overflow-wrap:anywhere;margin-top:3px}
+.led-inspect .swatch{display:inline-block;width:1em;height:1em;border:1px solid var(--wb-dim);border-radius:50%}
+.btn[aria-pressed="true"]{border-color:var(--wb-accent);color:var(--wb-accent)}
 .strip-labels{pointer-events:none;font:12px/16px system-ui,sans-serif}
 .strip-label-row{display:grid;grid-template-columns:minmax(0,1fr);padding-bottom:6px}
 .strip-range{grid-column:1;justify-self:start;align-self:start;position:relative;display:block;pointer-events:auto;
@@ -1395,6 +1415,8 @@ class WledBarsPanel extends HTMLElement {
     const selection = this._selection = Symbol();
     this._unsubscribe();
     this._entry = entryId;
+    this._inspect = false;
+    this._inspectIndex = 0;
     this._device = this._config = null;
     this._bars = [];
     this._live = { pixels: [], bars: {}, online: true };
@@ -1424,6 +1446,8 @@ class WledBarsPanel extends HTMLElement {
         if (selection !== this._selection) return;
         this._live.pixels = hexToPixels(msg.leds);
         this._live.online = msg.online;
+        this._live.overlays = msg.overlays || [];
+        this._live.frameRev = msg.frame_rev;
         this._live.bars = Object.fromEntries((msg.bars || []).filter((b) => b && b.id).map((b) => [b.id, b]));
         this._liveDirty = true;
         if (msg.rev > this._config?.rev && this._view === "list" && !this._pointerDown &&
@@ -1539,6 +1563,7 @@ class WledBarsPanel extends HTMLElement {
       if (index >= 0) this._edit(index);
     });
     this._liveStrip = new StripView(canvas, { annotations, ruler: true, max: 22, onClick: (led) => {
+      if (this._inspect) return this._selectLed(led);
       for (let k = this._bars.length - 1; k >= 0; k--) {
         const b = this._bars[k];
         if (led >= Math.min(b.start, b.end) && led <= Math.max(b.start, b.end)) return this._edit(k);
@@ -1549,15 +1574,31 @@ class WledBarsPanel extends HTMLElement {
     this._strips.push(this._liveStrip);
     this._offlineEl = h("div", { class: "banner sm", style: "display:none;margin-top:10px" },
       `Can't reach WLED at ${dev.host}. Bars will resume automatically when it is back.`);
+    const inspectButton = h("button", { class: "btn", "aria-pressed": String(!!this._inspect),
+      disabled: !dev.led_count, onclick: () => {
+        this._inspect = !this._inspect;
+        inspectButton.setAttribute("aria-pressed", String(this._inspect));
+        inspector.hidden = !this._inspect;
+        this._selectLed(this._inspectIndex);
+      } }, "Inspect LED");
+    this._inspectInput = h("input", { type: "number", min: 0, max: Math.max(0, dev.led_count - 1),
+      "aria-label": "LED number", oninput: e => {
+        if (e.target.value !== "" && e.target.validity.valid) this._selectLed(e.target.valueAsNumber);
+      }, onchange: () => this._selectLed(this._inspectIndex) });
+    this._inspectDetails = h("div", {});
+    this._inspectKey = null;
+    const inspector = h("div", { class: "led-inspect", hidden: !this._inspect },
+      h("div", { class: "rowx" }, h("label", { class: "rowx" }, "LED number", this._inspectInput),
+        h("span", { class: "dim sm" }, "Or select an LED on the strip.")), this._inspectDetails);
     wrap.append(
       h("div", { class: "card" },
         h("div", { class: "rowx", style: "margin-bottom:10px" },
           h("div", { class: "grow" }, h("h2", {}, dev.name), h("div", { class: "dim sm" }, `${dev.led_count} LEDs · ${dev.host} · live view · click a bar to edit it`)),
-          h("label", { class: "rowx sm" }, "All bars",
+          inspectButton, h("label", { class: "rowx sm" }, "All bars",
             h("input", { type: "checkbox", class: "sw", checked: !!this._settings.enabled,
               onchange: (e) => this._saveSettings({ ...this._settings, enabled: e.target.checked }) }))),
         h("div", { class: "stage" }, h("div", { class: "strip-overview" }, canvas, annotations.el)),
-        this._offlineEl)
+        inspector, this._offlineEl)
     );
 
     if (this._bars.length) {
@@ -1577,6 +1618,37 @@ class WledBarsPanel extends HTMLElement {
               h("span", { class: "ic" }, ic(t.icon, 24)), h("b", {}, t.name), h("span", { class: "dim sm" }, t.desc)))))
     );
     this._liveDirty = true;
+  }
+
+  _selectLed(value) {
+    this._inspectIndex = Math.max(0, Math.min(this._device.led_count - 1, Math.trunc(value) || 0));
+    this._inspectInput.value = this._inspectIndex;
+    this._liveStrip.focusLed = this._inspect ? this._inspectIndex : null;
+    this._liveStrip.draw();
+    if (this._inspect) this._updateInspector();
+  }
+
+  _updateInspector() {
+    const led = this._inspectIndex;
+    const live = this._live;
+    const details = this._inspectDetails;
+    if (!this._device.led_count || live.frameRev !== this._config.rev || !live.pixels[led]) {
+      details.textContent = this._device.led_count ? "Waiting for a current frame…" : "This segment has no LEDs.";
+      this._inspectKey = null;
+      return;
+    }
+    const address = ledAddress(led, this._device, this._settings);
+    const { owner, layers } = inspectLed(led, this._bars, live, (b, i) => this._statusOf(b, i).text);
+    const hex = owner === null ? null : "#" + live.pixels[led].map(c => c.toString(16).padStart(2, "0")).join("").toUpperCase();
+    const key = JSON.stringify([address, layers, hex, live.online]);
+    if (key === this._inspectKey) return;
+    this._inspectKey = key;
+    details.replaceChildren(h("p", { class: "rowx" }, h("b", {}, address),
+      hex && h("span", { class: "swatch", style: `background:${hex}` }), hex,
+      !live.online && h("span", { class: "dim" }, "Calculated while offline")),
+      owner === null ? h("div", {}, "No bar paints this LED.") : h("div", {}, `Output from ${owner}`),
+      h("ul", { class: "sm" }, layers.map(layer => h("li", {}, h("b", {}, layer.name),
+        h("span", { class: "dim" }, layer.reason)))));
   }
 
   _barColor(i) {
@@ -3107,9 +3179,9 @@ class WledBarsPanel extends HTMLElement {
       ],
       caps: () => [...cap("start", "Beginning"), ...cap("end", "End")],
       track: () => [
-        F("Unlit LEDs show", I(tr, "mode", "sel", { options: [["dim", "A dim version of the bar colour"], ["color", "A fixed colour"]] })),
+        F("Unlit LEDs show", I(tr, "mode", "sel", { options: [["dim", "A dim version of the bar colour"], ["color", "A fixed colour"], ["transparent", "Show bars underneath"]] })),
         tr.mode === "color" && F("Colour", I(tr, "color", "color")),
-        F("Brightness", I(tr, "level", "range", { min: 1, max: 50, unit: " %" })),
+        tr.mode !== "transparent" && F("Brightness", I(tr, "level", "range", { min: 1, max: 50, unit: " %" })),
       ],
       ticks: () => [
         F("A mark every", I(tk, "every", "sel", { options: [["50", "50 %"], ["25", "25 %"], ["20", "20 %"], ["10", "10 %"]] })),
@@ -3407,8 +3479,11 @@ class WledBarsPanel extends HTMLElement {
       }
       if (this._picker) {
         const n = this._device.led_count;
-        const all = new Array(n).fill([0, 0, 0]);
-        if (valid) E.barLeds(bar).forEach((idx, i) => { all[idx] = px[i]; });
+        // Once the strip is previewing this draft, it has the exact colours beneath it.
+        const draftId = this._draftIndex < 0 ? "__draft__" : bar.id;
+        const previewing = this._onStrip && this._live.overlays?.some(layer => layer.preview === draftId);
+        const all = previewing ? this._live.pixels.slice(0, n) : new Array(n).fill([0, 0, 0]);
+        if (valid && !previewing) E.barLeds(bar).forEach((idx, i) => { all[idx] = px[i]; });
         this._picker.pixels = all;
         this._picker.sel = valid ? { start: bar.start, end: bar.end } : null;
         this._picker.draw();
@@ -3421,6 +3496,12 @@ class WledBarsPanel extends HTMLElement {
       const n = this._device.led_count;
       const live = this._live.pixels;
       this._liveStrip.pixels = Array.from({ length: n }, (_x, i) => live[i] || [0, 0, 0]);
+      this._inspectIndex = Math.max(0, Math.min(n - 1, this._inspectIndex || 0));
+      this._liveStrip.focusLed = this._inspect ? this._inspectIndex : null;
+      if (this._inspect) {
+        if (this.shadowRoot.activeElement !== this._inspectInput) this._inspectInput.value = this._inspectIndex;
+        this._updateInspector();
+      }
       this._liveStrip.draw();
       if (this._offlineEl) this._offlineEl.style.display = this._live.online ? "none" : "";
       for (const strip of this._strips) {
@@ -3736,14 +3817,14 @@ class WledBarsCard extends HTMLElement {
           const st = L.bars[bar.id];
           if (!st?.would || !rangeFits(bar, n)) continue;
           const sk = this._sketch(bar, st, t);
-          E.barLeds(bar).forEach((idx, i) => { if (idx < n) px[idx] = sk[i]; });
+          E.barLeds(bar).forEach((idx, i) => { if (idx < n && sk[i] !== null) px[idx] = sk[i]; });
         }
       }
       if (selHidden) {
         // a faint sketch of the hidden bar, only where the strip is dark
         const sk = this._sketch(selBar, L.bars[selBar.id], t);
         E.barLeds(selBar).forEach((idx, i) => {
-          if (idx < n && !Math.max(...px[idx])) px[idx] = sk[i].map((v) => Math.round(v * (preview ? 0.5 : 0.22)));
+          if (idx < n && sk[i] !== null && !Math.max(...px[idx])) px[idx] = sk[i].map((v) => Math.round(v * (preview ? 0.5 : 0.22)));
         });
       }
       this._strip.pixels = px;
@@ -3773,7 +3854,7 @@ class WledBarsCard extends HTMLElement {
       // colour: what is on the strip now, else what the bar would use
       let best = null, level = 0;
       const pxs = !rangeFits(bar, n) ? [] : on ? E.barLeds(bar).map((idx) => L.pixels[idx] || [0, 0, 0]) : this._sketch(bar, st && st.state === "active" && st.percent < 15 ? { ...st, percent: 15 } : st, 0);
-      for (const p of pxs) { const lv = Math.max(p[0], p[1], p[2]); if (lv > level) { level = lv; best = p; } }
+      for (const p of pxs) { if (!p) continue; const lv = Math.max(...p); if (lv > level) { level = lv; best = p; } }
       const k = best ? 255 / Math.max(120, level) : 1; // a swatch should be readable even when the strip is dim
       row.el.style.setProperty("--c", best ? `rgb(${best.map((v) => Math.min(255, Math.round(v * k))).join(",")})` : "#667");
       row.el.className = "row" + (on ? " on" : " hid") + (this._sel === bar.id ? " sel" : "");

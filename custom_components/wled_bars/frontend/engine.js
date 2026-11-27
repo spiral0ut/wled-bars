@@ -297,7 +297,7 @@ export function isAnimated(bar) {
 // ---------- rendering ----------
 
 function finish(pixels, bright) {
-  return pixels.map((c) => [
+  return pixels.map((c) => c === null ? null : [
     Math.floor(clamp(c[0] * bright, 0, 255) + 0.5),
     Math.floor(clamp(c[1] * bright, 0, 255) + 0.5),
     Math.floor(clamp(c[2] * bright, 0, 255) + 0.5),
@@ -468,20 +468,29 @@ export function renderBar(bar, ctx) {
       if (ticks.over) litC = tickColor;
     }
 
+    let painted = track.mode !== "transparent" || cov > 0 || tickSet.has(d) || ruleAll;
     let c;
     if (ruleAll) c = scale(base, ruleLevel);
     else {
       c = mix(tr, scale(litC, ruleLevel), cov);
-      if (d === peakD && cov < 1) c = peakColor;
-      for (const [md, mc, ml] of markerList) if (d === md) c = mix(c, mc, ml);
+      if (d === peakD && cov < 1) {
+        c = peakColor;
+        painted = true;
+      }
+      for (const [md, mc, ml] of markerList) {
+        if (d !== md) continue;
+        c = mix(c, mc, ml);
+        painted ||= ml > 0;
+      }
       if (tipOn && tipLo <= d && d < tipHi && d < mh) {
         const tl = tip.taper ? (d - tipLo + 1) / tipK : 1;
         const tc = tip.auto ? mix(base, WHITE, 0.6) : tipColor;
         const off = tip.off === "under" ? c : BLACK;
         c = mix(off, scale(tc, tl), tipLevel);
+        painted ||= tip.off !== "under" || tipLevel > 0;
       }
     }
-    pixels.push(c);
+    pixels.push(painted ? c : null);
   }
 
   cap = caps.end;

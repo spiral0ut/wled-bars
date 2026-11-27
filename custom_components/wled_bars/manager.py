@@ -149,6 +149,17 @@ def showing_text(rows: list[dict]) -> str:
     return ";".join(parts)
 
 
+def led_ranges(indices) -> list[list[int]]:
+    """Compact ascending, inclusive ranges of LEDs actually painted in a frame."""
+    ranges = []
+    for idx in sorted(set(indices)):
+        if ranges and ranges[-1][1] + 1 == idx:
+            ranges[-1][1] = idx
+        else:
+            ranges.append([idx, idx])
+    return ranges
+
+
 class BarLookupError(LookupError):
     """A service named a bar that does not exist, or a name several bars share."""
 
@@ -240,6 +251,8 @@ class BarsManager:
         self._identify: tuple[list[int], float] | None = None  # (leds, until)
         self._flash: tuple[list[int], dict, float, float] | None = None  # (leds, look, started, seconds)
         self._last_frame: dict[int, tuple[int, int, int]] = {}
+        self._frame_rev: int | None = None
+        self._frame_overlays: list[dict] = []
         self._status_sig: tuple = ()
         self._last_repaint = 0.0
 
@@ -560,6 +573,8 @@ class BarsManager:
             "enabled": bool(self.settings["enabled"]),
             "brightness": self.settings["brightness"],
             "rev": self._rev,  # goes up whenever bars or settings are saved
+            "frame_rev": self._frame_rev,
+            "overlays": self._frame_overlays,
             "bars": [rt.status for rt in self.runtimes],
         }
 
@@ -592,6 +607,9 @@ class BarsManager:
                         "start": seg.get("start", 0),
                         "stop": seg.get("stop", 0),
                         "name": seg.get("n", ""),
+                        "linear": not (seg.get("rev") or seg.get("mi") or seg.get("of")
+                                       or seg.get("spc") or seg.get("grp", 1) != 1
+                                       or (info.get("leds") or {}).get("matrix")),
                     }
                     for n, seg in enumerate(state.get("seg", []))
                     if isinstance(seg, dict) and seg.get("stop", 0)
@@ -1160,6 +1178,7 @@ class BarsManager:
         bright = self._brightness(utc)
 
         frame: dict[int, tuple[int, int, int]] = {}
+        overlays = []
         animated = False
         step = 1.0  # seconds between frames for bars that only creep with time
 
@@ -1167,20 +1186,24 @@ class BarsManager:
         if preview and (now > preview[2] or max(preview[0]["start"], preview[0]["end"]) >= self.led_count):
             preview = self._preview = None
 
-        def paint(bar: dict, ctx: dict) -> list:
+        def paint(bar: dict, ctx: dict, status: dict) -> list:
             pixels = engine.render_bar(bar, ctx)
-            for idx, px in zip(engine.bar_leds(bar), pixels):
-                if 0 <= idx < self.led_count:
+            indices = engine.bar_leds(bar)
+            for idx, px in zip(indices, pixels):
+                if px is not None and 0 <= idx < self.led_count:
                     frame[idx] = px
+            if bar["track"]["mode"] == "transparent":
+                status["painted"] = led_ranges(idx for idx, px in zip(indices, pixels) if px is not None)
             return pixels
 
         for rt in self.runtimes:
             ctx = self._evaluate(rt, now, utc, bright)
             if preview and preview[0]["id"] == rt.bar["id"]:
+                rt.status.update(visible=False, why="preview")
                 continue  # the draft being edited replaces the saved bar
             if ctx is None:
                 continue
-            rt.status["color"] = self._bar_color(rt, paint(rt.bar, ctx))
+            rt.status["color"] = self._bar_color(rt, paint(rt.bar, ctx, rt.status))
             if rt.easing or engine.is_animated(rt.bar):
                 animated = True
             if rt.total:
@@ -1189,6 +1212,9 @@ class BarsManager:
 
         if preview:
             pbar, pfrac, _ = preview
+            draft = {"name": f"{pbar['name']} (preview)", "preview": pbar["id"],
+                     "start": pbar["start"], "end": pbar["end"]}
+            overlays.append(draft)
             value = engine.frac_to_value(pbar, 1.0 - pfrac if pbar["source"]["invert"] else pfrac)
             markers = []
             for marker in pbar["markers"]:
@@ -1204,6 +1230,7 @@ class BarsManager:
                     "rule": engine.pick_rule(pbar, value, pfrac * 100.0, self._state),
                     "markers": markers,
                 },
+                draft,
             )
             animated = True
 
@@ -1213,6 +1240,7 @@ class BarsManager:
                 self._identify = None
             else:
                 on = int(now * 4) % 2 == 0
+                overlays.append({"name": "Identify LEDs", "painted": led_ranges(leds)})
                 for idx in leds:
                     if 0 <= idx < self.led_count:
                         frame[idx] = (255, 255, 255) if on else BLACK
@@ -1224,6 +1252,7 @@ class BarsManager:
             if age > seconds or not self.settings["enabled"]:
                 self._flash = None
             else:
+                overlays.append({"name": "Strip flash", "painted": led_ranges(leds)})
                 for idx, px in zip(leds, flash_pixels(look, len(leds), age)):
                     if idx >= self.led_count:
                         continue
@@ -1231,6 +1260,8 @@ class BarsManager:
                 animated = True
 
         self._last_frame = frame
+        self._frame_overlays = overlays
+        self._frame_rev = self._rev
         if (
             self._sent
             and self.settings["transport"] == "json"
@@ -1275,7 +1306,7 @@ class BarsManager:
     @staticmethod
     def _bar_color(rt: BarRuntime, pixels: list) -> str | None:
         """The bar's colour at full strength: its brightest LED, ignoring the dark half of a blink."""
-        best = max(pixels, key=max, default=None)
+        best = max((px for px in pixels if px is not None), key=max, default=None)
         level = max(best) if best else 0
         if level <= 0:
             return rt.color

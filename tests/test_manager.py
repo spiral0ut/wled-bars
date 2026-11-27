@@ -817,6 +817,34 @@ async def review_regressions(port, fake, bar):
     assert not SENT
     print("ok color-only sensor update and stable-frame filtering")
 
+    lower = dict(bar, name="Blue", color={"mode": "solid", "stops": [{"pos": 0, "color": "#0000ff"}]})
+    upper = dict(bar, id="top", name="Black", start=19, end=10, track={"mode": "transparent"},
+                 source={"type": "entity", "entity": "sensor.upper"},
+                 color={"mode": "solid", "stops": [{"pos": 0, "color": "#000000"}]})
+    hass.set("sensor.upper", 30)
+    await mgr.async_save([lower, upper], {**mgr.settings, "brightness": 100})
+    await mgr._frame()
+    snapshot = mgr._snapshot()
+    assert snapshot["frame_rev"] == mgr.revision and snapshot["bars"][1]["painted"] == [[17, 19]]
+    assert fake.leds[10:20] == [(0, 0, 255)] * 7 + [(0, 0, 0)] * 3
+    hass.set("sensor.upper", 0)
+    await mgr._frame()
+    assert mgr._snapshot()["bars"][1]["painted"] == [] and fake.leds[10:20] == [(0, 0, 255)] * 10
+    mgr.set_preview(upper, 0.5)
+    mgr.identify([15, 17])
+    mgr.flash([17], "#ff0000", "solid", 5)
+    await mgr._frame()
+    snapshot = mgr._snapshot()
+    assert snapshot["bars"][1]["why"] == "preview"
+    assert [ov["painted"] for ov in snapshot["overlays"]] == [[[15, 19]], [[15, 15], [17, 17]], [[17, 17]]]
+    assert fake.leds[14] == (0, 0, 255) and fake.leds[18] == (0, 0, 0)
+    mgr.set_preview(None, 0)
+    mgr._identify = mgr._flash = None
+    await mgr.async_save([bar], None)
+    await mgr._frame()
+    assert mgr._snapshot()["overlays"] == []
+    print("ok transparent and opaque black over lower bars, frame coverage and temporary overrides")
+
     await mgr.async_control(bar_id=bar["id"], enabled=False)
     await mgr._frame()
     assert fake.frozen

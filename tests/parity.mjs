@@ -32,7 +32,7 @@ for (let i = 0; i < 600; i++) {
       rainbow_span: int(60, 720),
       rainbow_speed: int(0, 90),
     },
-    track: { mode: pick(["off", "color", "dim"]), color: col(), level: int(0, 40) },
+    track: { mode: pick(["off", "color", "dim", "transparent"]), color: col(), level: int(0, 40) },
     caps: {
       start: { count: int(0, 3), color: col(), level: int(10, 100), effect: eff(), period: r3(0.3 + rnd() * 2) },
       end: { count: int(0, 3), color: col(), level: int(10, 100), effect: eff(), period: r3(0.3 + rnd() * 2) },
