@@ -182,7 +182,9 @@ export function importedSettings(file, base, adopted, adding) {
       if (!layout || typeof layout.name !== "string" || !Array.isArray(layout.bars)) throw new Error("Invalid layout in the backup.");
       const id = used.has(layout.id) ? newId() : layout.id;
       const name = freeName(layout.name, names);
-      const bars = layout.bars.map(b => ({ ...b, id: barIds.get(b.id) ?? b.id }));
+      // A deleted source bar can share an ID with an unrelated bar on this strip.
+      const members = file.bars.length ? layout.bars.filter(b => barIds.has(b.id)) : layout.bars;
+      const bars = members.map(b => ({ ...b, id: barIds.get(b.id) ?? b.id }));
       existing.push({ id, name, bars }); used.add(id); names.push(name);
       if (layout.id === file.settings.active_layout) active = id;
     }

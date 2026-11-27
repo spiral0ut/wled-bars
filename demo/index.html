@@ -75,6 +75,12 @@ const use = (id) => {
   LEDS = device.led_count;
 };
 const tidy = (list) => list.map((b) => { const nb = E.normalizeBar(b); if (!nb.id) nb.id = Math.random().toString(16).slice(2, 10); return nb; });
+function matchActive(settings, bars) {
+  if (!settings.active_layout) return settings;
+  const layout = settings.layouts.find(l => l.id === settings.active_layout);
+  if (layout && layoutBars(bars, layout).every((b, i) => b.id === bars[i].id && b.enabled === bars[i].enabled)) return settings;
+  return { ...settings, active_layout: "" };
+}
 const listeners = new Set();
 const shown = {};
 const fullSince = {};
@@ -183,11 +189,13 @@ const hass = {
         const other = stores[msg.entry_id];
         if (msg.bars) other.bars = tidy(msg.bars);
         if (msg.settings) other.settings = msg.settings;
+        other.settings = matchActive(other.settings, other.bars);
         other.rev++;
         return structuredClone(other);
       }
       if (msg.bars) bars = tidy(msg.bars);
       if (msg.settings) settings = msg.settings;
+      settings = matchActive(settings, bars);
       rev++;
       return structuredClone({ device, bars, settings, rev });
     }
@@ -195,6 +203,7 @@ const hass = {
       if (msg.enabled !== undefined) settings = { ...settings, enabled: msg.enabled };
       if (msg.brightness !== undefined) settings = { ...settings, brightness: msg.brightness };
       if (msg.bar) bars = bars.map((b) => (b.id === msg.bar ? { ...b, enabled: msg.bar_enabled } : b));
+      settings = matchActive(settings, bars);
       rev++;
       return null;
     }

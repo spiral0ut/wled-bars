@@ -66,7 +66,9 @@ test("adding backup layouts keeps the original and points each copy at its impor
   assert.notEqual(adopted[0].id, bars[0].id);
   assert.equal(settings.layouts.length, 2);
   assert.notEqual(settings.layouts[0].id, settings.layouts[1].id);
-  assert.equal(settings.layouts[1].bars.at(-1).id, adopted[0].id);
+  assert.deepEqual(settings.layouts[1].bars, [{ id: adopted[0].id, enabled: true }]);
+  const settingsOnly = importedSettings({ ...file, bars: [] }, base, [], false);
+  assert.deepEqual(settingsOnly.layouts[0].bars, layout.bars);
   assert.equal(settings.active_layout, "work");
   assert.equal(settings.segment, 1);
   assert.deepEqual(settings.map_runs, file.settings.map_runs);
