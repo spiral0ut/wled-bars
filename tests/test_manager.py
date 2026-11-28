@@ -86,6 +86,9 @@ class _Entity:
     def async_on_remove(self, _cb):
         pass
 
+    async def async_added_to_hass(self):
+        pass
+
 
 class _Registry:
     def async_get(self, _entity_id):
@@ -98,6 +101,8 @@ _mod("homeassistant.helpers.entity_registry", async_get=lambda hass: _Registry()
 _mod("homeassistant.helpers.device_registry", DeviceInfo=dict)
 _mod("homeassistant.const", PERCENTAGE="%")
 _mod("homeassistant.components")
+_mod("homeassistant.exceptions", HomeAssistantError=RuntimeError)
+_mod("homeassistant.components.scene", Scene=type("Scene", (), {}))
 _mod("homeassistant.components.switch", SwitchEntity=type("SwitchEntity", (), {}))
 _mod("homeassistant.components.number", NumberEntity=type("NumberEntity", (), {}), NumberMode=types.SimpleNamespace(SLIDER="slider"))
 _mod("homeassistant.components.sensor", SensorEntity=type("SensorEntity", (), {}), SensorStateClass=types.SimpleNamespace(MEASUREMENT="measurement"))
@@ -844,6 +849,66 @@ async def review_regressions(port, fake, bar):
     await mgr._frame()
     assert mgr._snapshot()["overlays"] == []
     print("ok transparent and opaque black over lower bars, frame coverage and temporary overrides")
+
+    scenes = importlib.import_module("wb.scene")
+    hass.data = {"wled_bars": {target.entry_id: mgr}}
+    target.async_on_unload = lambda cb: None
+    named = []
+    await scenes.async_setup_entry(hass, target, named.extend)
+    layout = {"id": "desk", "name": "Workbench", "bars": [{"id": upper["id"], "enabled": False},
+              {"id": lower["id"], "enabled": True}, {"id": "deleted", "enabled": True}]}
+    run = {"id": "wall", "name": "Wall", "first": 20, "last": 39, "x": -5, "y": 3, "axis": "x", "flip": True}
+    await mgr.async_save([lower, upper], {**mgr.settings, "layouts": [layout], "map_runs": [run]})
+    scene, = named
+    uid = scene._attr_unique_id
+    assert scene.name == "Workbench" and scene.extra_state_attributes["layout_id"] == "desk"
+    new = dict(lower, id="new", name="New bar")
+    await mgr.async_save([dict(lower, name="Renamed bar"), upper, new], None)
+    await scene.async_activate()
+    assert [(b["id"], b["enabled"]) for b in mgr.bars] == [("top", False), (lower["id"], True), ("new", False)]
+    assert mgr.bars[1]["name"] == "Renamed bar" and mgr.settings["active_layout"] == "desk"
+    await mgr._frame()
+    assert fake.leds[10] == (0, 0, 255)
+    await mgr.async_control({"brightness": 76})
+    await mgr.async_save(None, {**mgr.settings, "layouts": [dict(layout, name="Focus")]})
+    assert len(named) == 1 and scene.name == "Focus" and scene._attr_unique_id == uid
+    saved = mgr._stored()
+    loaded = manager_mod.BarsManager(hass, target)
+    loaded._apply(saved["bars"], saved["settings"])
+    assert loaded.settings["active_layout"] == "desk" and loaded.settings["map_runs"] == [run]
+    await mgr.async_control(bar_id="new", enabled=True)
+    assert not mgr.settings["active_layout"]
+    await mgr.async_save(None, {"brightness": 87})  # old client
+    assert mgr.settings["layouts"][0]["name"] == "Focus" and mgr.settings["map_runs"] == [run]
+    for bad in [dict(run, last=40), dict(run, first=30, last=15), dict(run, x=1.1)]:
+        try:
+            await mgr.async_save(None, {**mgr.settings, "map_runs": [bad]})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid physical map was accepted: {bad}")
+    for other in [dict(run, id="other", first=19, last=21, y=10), dict(run, id="cross", first=0, last=4, axis="y", x=0, y=1)]:
+        try:
+            await mgr.async_save(None, {**mgr.settings, "map_runs": [run, other]})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("map addresses and occupied grid cells must be unique")
+    before = mgr.configuration()
+    with patch.object(mgr._store, "async_save", side_effect=OSError("full")):
+        try:
+            await scene.async_activate()
+        except OSError:
+            pass
+    assert mgr.configuration() == before
+    await mgr.async_save([bar], {**mgr.settings, "layouts": [], "map_runs": [], "idle": "black"})
+    try:
+        await scene.async_activate()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("deleted scene activated")
+    print("ok native scenes, stable layout IDs, atomic activation, physical map validation and restart")
 
     await mgr.async_control(bar_id=bar["id"], enabled=False)
     await mgr._frame()

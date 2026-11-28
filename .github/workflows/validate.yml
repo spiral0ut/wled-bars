@@ -38,6 +38,6 @@ jobs:
         with:
           node-version: "20"
       - run: pip install aiohttp
-      - run: node --test tests/strip-labels.mjs tests/config-edits.mjs tests/led-inspect.mjs
+      - run: node --test tests/strip-labels.mjs tests/config-edits.mjs tests/led-inspect.mjs tests/arrangements.mjs
       - run: python tests/test_engine.py
       - run: python -u tests/test_manager.py

@@ -3,11 +3,15 @@
 // engine as the backend (engine.js mirrors engine.py).
 // Load matching frontend modules when Home Assistant switches release versions.
 const revision = new URL(import.meta.url).search;
-const [E, { layoutStripLabels }, { saveConfigEdit }, { inspectLed, ledAddress, paintsLed }] = await Promise.all([
+const [E, { layoutStripLabels }, { saveConfigEdit, newId }, { inspectLed, ledAddress, paintsLed },
+  { h }, { StripMap, controllerRuns, outputSpan, physicalCount, runColor }, { editLayouts, editPhysicalMap }] = await Promise.all([
   import("./engine.js" + revision),
   import("./strip-labels.js" + revision),
   import("./config-edits.js" + revision),
   import("./led-inspect.js" + revision),
+  import("./elements.js" + revision),
+  import("./strip-map.js" + revision),
+  import("./arrangement-dialogs.js" + revision),
 ]);
 
 const DOMAIN = "wled_bars";
@@ -56,19 +60,6 @@ const STALE_CSS = `.stale{display:flex;align-items:center;gap:12px;flex-wrap:wra
 
 // ---------- tiny DOM helpers ----------
 
-const h = (tag, props, ...kids) => {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props || {})) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === "class") el.className = v;
-    else if (k === "style") el.style.cssText = v;
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k !== "list" && k in el) el[k] = v;
-    else el.setAttribute(k, v === true ? "" : v);
-  }
-  for (const kid of kids.flat(3)) if (kid !== null && kid !== undefined && kid !== false) el.append(kid);
-  return el;
-};
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
 // ---------- icons: one-colour line drawings that take the text colour ----------
@@ -164,8 +155,8 @@ export function adoptBars(incoming, existing, from, to) {
     [bar.start, bar.end] = fitRange(bar.start, bar.end, from, to, scale);
     bar.name = freeName(bar.name, names);
     names.push(bar.name);
-    if (!bar.id || ids.has(bar.id)) bar.id = "";
-    else ids.add(bar.id);
+    while (!bar.id || ids.has(bar.id)) bar.id = newId();
+    ids.add(bar.id);
     return bar;
   });
 }
@@ -179,6 +170,31 @@ const addressableLeds = (device, settings) => {
   }
   return device.strip_count ?? device.led_count;
 };
+
+export function importedSettings(file, base, adopted, adding) {
+  const settings = { ...base.settings, ...file.settings, segment: base.settings.segment };
+  if (Array.isArray(file.settings.layouts)) {
+    const existing = adding && file.bars.length ? [...(base.settings.layouts || [])] : [];
+    const used = new Set(existing.map(l => l.id)), names = existing.map(l => l.name);
+    const barIds = new Map(file.bars.map((b, i) => [b.id, adopted[i].id]));
+    let active = "";
+    for (const layout of file.settings.layouts) {
+      if (!layout || typeof layout.name !== "string" || !Array.isArray(layout.bars)) throw new Error("Invalid layout in the backup.");
+      const id = used.has(layout.id) ? newId() : layout.id;
+      const name = freeName(layout.name, names);
+      // A deleted source bar can share an ID with an unrelated bar on this strip.
+      const members = file.bars.length ? layout.bars.filter(b => barIds.has(b.id)) : layout.bars;
+      const bars = members.map(b => ({ ...b, id: barIds.get(b.id) ?? b.id }));
+      existing.push({ id, name, bars }); used.add(id); names.push(name);
+      if (layout.id === file.settings.active_layout) active = id;
+    }
+    settings.layouts = existing;
+    settings.active_layout = adding && file.bars.length ? base.settings.active_layout : active;
+  }
+  if (Array.isArray(settings.map_runs) && settings.map_runs.some(r => r.last >= physicalCount(base.device)))
+    settings.map_runs = base.settings.map_runs ?? null;
+  return settings;
+}
 
 // What a chosen file holds, or null when it isn't a WLED Bars export.
 export function readExport(text) {
@@ -1101,6 +1117,19 @@ const CSS = `
 .stage canvas{display:block;width:100%}
 .strip-overview,.strip-labels{position:relative}
 .strip-overview > canvas{position:absolute;top:0;left:0}
+.map-canvas{display:block;width:100%;border-radius:8px;background:var(--wb-stage);cursor:crosshair}
+.map-canvas.movable{touch-action:none;cursor:grab}.map-canvas.movable:active{cursor:grabbing}
+.map-legend{display:flex;gap:8px 16px;flex-wrap:wrap;margin:8px 0}
+.map-legend .run-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.map-selection{margin:5px 0;color:var(--wb-dim)}
+dialog.arr-dialog{padding:16px}.arr-dialog h2{margin:0 0 12px}.arr-dialog button{flex:none}
+.arr-row{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--wb-line)}
+.arr-row > .grow{min-width:0;overflow-wrap:anywhere}.arr-row input{flex:none}
+.arr-dialog .arr-field{display:grid;gap:3px;margin:6px 0;font-size:13px}
+.arr-dialog :is(input:not([type=checkbox]),select){width:100%;min-width:0}
+.arr-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 12px;margin:8px 0}
+.arr-fields[hidden]{display:none}.arr-field:first-child{grid-column:1/-1}
+.arr-footer{margin-top:14px;justify-content:flex-end}.arr-error{color:var(--wb-err);margin-top:6px}
 .led-inspect{margin-top:10px;border-top:1px solid var(--wb-line);padding-top:10px}
 .led-inspect input{width:6em}
 .led-inspect ul{list-style:none;padding:0;margin:6px 0 0}
@@ -1416,6 +1445,7 @@ class WledBarsPanel extends HTMLElement {
     this._unsubscribe();
     this._entry = entryId;
     this._inspect = false;
+    this._mapView = false;
     this._inspectIndex = 0;
     this._device = this._config = null;
     this._bars = [];
@@ -1487,7 +1517,7 @@ class WledBarsPanel extends HTMLElement {
     finally { if (this._refreshing === selection) this._refreshing = null; }
   }
 
-  async _saveEdit(changes, base = this._config, undoText) {
+  async _saveEdit(changes, base = this._config, undoText, onError) {
     try {
       const result = await saveConfigEdit((type, data) => this.ws(type, data), base, changes);
       if (this._config) this._acceptConfig(result.saved);
@@ -1497,7 +1527,8 @@ class WledBarsPanel extends HTMLElement {
       });
       return true;
     } catch (err) {
-      this._toast(err?.message || String(err));
+      const message = err?.message || String(err);
+      if (onError) onError(message); else this._toast(message);
       return false;
     }
   }
@@ -1556,6 +1587,7 @@ class WledBarsPanel extends HTMLElement {
 
   _renderList(wrap) {
     const dev = this._device;
+    this._liveMap = null;
     const canvas = h("canvas");
     const ranges = this._bars.map((bar, i) => ({ id: bar.id, start: bar.start, end: bar.end, label: bar.name, color: this._barColor(i) }));
     const annotations = new StripLabels(ranges, id => {
@@ -1574,13 +1606,14 @@ class WledBarsPanel extends HTMLElement {
     this._strips.push(this._liveStrip);
     this._offlineEl = h("div", { class: "banner sm", style: "display:none;margin-top:10px" },
       `Can't reach WLED at ${dev.host}. Bars will resume automatically when it is back.`);
+    const setInspect = (on, led = this._inspectIndex) => {
+      this._inspect = on;
+      inspectButton.setAttribute("aria-pressed", String(on));
+      inspector.hidden = !on;
+      this._selectLed(led);
+    };
     const inspectButton = h("button", { class: "btn", "aria-pressed": String(!!this._inspect),
-      disabled: !dev.led_count, onclick: () => {
-        this._inspect = !this._inspect;
-        inspectButton.setAttribute("aria-pressed", String(this._inspect));
-        inspector.hidden = !this._inspect;
-        this._selectLed(this._inspectIndex);
-      } }, "Inspect LED");
+      disabled: !dev.led_count, onclick: () => setInspect(!this._inspect) }, "Inspect LED");
     this._inspectInput = h("input", { type: "number", min: 0, max: Math.max(0, dev.led_count - 1),
       "aria-label": "LED number", oninput: e => {
         if (e.target.value !== "" && e.target.validity.valid) this._selectLed(e.target.valueAsNumber);
@@ -1588,17 +1621,23 @@ class WledBarsPanel extends HTMLElement {
     this._inspectDetails = h("div", {});
     this._inspectKey = null;
     const inspector = h("div", { class: "led-inspect", hidden: !this._inspect },
-      h("div", { class: "rowx" }, h("label", { class: "rowx" }, "LED number", this._inspectInput),
+      h("div", { class: "rowx" }, h("label", { class: "rowx" },
+        this._mapView && this._settings.transport === "json" ? "Segment LED number" : "LED number", this._inspectInput),
         h("span", { class: "dim sm" }, "Or select an LED on the strip.")), this._inspectDetails);
     wrap.append(
       h("div", { class: "card" },
         h("div", { class: "rowx", style: "margin-bottom:10px" },
-          h("div", { class: "grow" }, h("h2", {}, dev.name), h("div", { class: "dim sm" }, `${dev.led_count} LEDs · ${dev.host} · live view · click a bar to edit it`)),
+          h("div", { class: "grow" }, h("h2", {}, dev.name), h("div", { class: "dim sm" }, `${dev.led_count} LEDs · ${dev.host} · live view`)),
+          h("button", { class: "btn map-toggle", "aria-pressed": String(!!this._mapView), onclick: () => {
+            this._mapView = !this._mapView; this._render();
+            this.shadowRoot.querySelector(".map-toggle")?.focus();
+          } }, "Physical map"),
           inspectButton, h("label", { class: "rowx sm" }, "All bars",
             h("input", { type: "checkbox", class: "sw", checked: !!this._settings.enabled,
               onchange: (e) => this._saveSettings({ ...this._settings, enabled: e.target.checked }) }))),
-        h("div", { class: "stage" }, h("div", { class: "strip-overview" }, canvas, annotations.el)),
-        inspector, this._offlineEl)
+        this._mapView ? this._physicalStage(setInspect) :
+          h("div", { class: "stage" }, h("div", { class: "strip-overview" }, canvas, annotations.el)),
+        inspector, this._offlineEl, this._layoutControls())
     );
 
     if (this._bars.length) {
@@ -1621,11 +1660,69 @@ class WledBarsPanel extends HTMLElement {
   }
 
   _selectLed(value) {
+    if (this._mapView && this._mapNote) this._mapNote.textContent = "";
     this._inspectIndex = Math.max(0, Math.min(this._device.led_count - 1, Math.trunc(value) || 0));
     this._inspectInput.value = this._inspectIndex;
     this._liveStrip.focusLed = this._inspect ? this._inspectIndex : null;
-    this._liveStrip.draw();
+    if (this._mapView) this._drawMap(); else this._liveStrip.draw();
     if (this._inspect) this._updateInspector();
+  }
+
+  _layoutControls() {
+    const layouts = this._settings.layouts || [];
+    return h("div", { class: "rowx", style: "margin-top:10px" },
+      layouts.length > 0 && h("label", { class: "rowx sm" }, "Active layout",
+        h("select", { value: this._settings.active_layout || "", onchange: async e => {
+          const selector = e.target, entry = this._entry;
+          selector.disabled = true;
+          try {
+            const result = await this.ws("activate_layout", { entry_id: entry, layout_id: selector.value });
+            if (entry === this._entry) { this._acceptConfig(result); this._render(); }
+          } catch (err) {
+            selector.value = this._settings.active_layout || "";
+            this._toast(err?.message || String(err));
+          } finally { selector.disabled = false; }
+        } }, h("option", { value: "", disabled: true, selected: !this._settings.active_layout }, "Custom arrangement"),
+        layouts.map(l => h("option", { value: l.id, selected: l.id === this._settings.active_layout }, l.name)))),
+      h("button", { class: "btn xs", onclick: () => editLayouts(this) }, "Manage layouts"));
+  }
+
+  _physicalStage(setInspect) {
+    const dev = this._device, span = outputSpan(dev, this._settings);
+    const runs = this._settings.map_runs ?? controllerRuns(dev);
+    const note = this._mapNote = h("div", { class: "map-selection sm", role: "status" });
+    const pick = (run, led) => {
+      if (span && led >= span[0] && led <= span[1]) {
+        note.textContent = "";
+        setInspect(true, led - span[0]);
+      } else {
+        setInspect(false);
+        note.textContent = span ? `${run.name} · physical LED ${led} is outside the selected output range.` :
+          `${run.name} · physical LED ${led}. The controller has no one-to-one mapping for this segment.`;
+        this._liveMap.selectedLed = led;
+        this._liveMap.draw();
+      }
+    };
+    const canvas = h("canvas", { class: "map-canvas", role: "img", "aria-label": "Live physical strip map" });
+    this._liveMap = new StripMap(canvas, runs, { pick });
+    this._liveMap.span = span;
+    const endpoint = (run, led) => h("button", { class: "btn xs", "aria-label": `${run.name}, physical LED ${led}`,
+      onclick: () => pick(run, led) }, String(led));
+    return h("div", {}, runs.length ? canvas : h("p", { class: "dim sm" }, "No runs on this map yet."),
+      h("div", { class: "map-legend" }, runs.map((r, i) => {
+      const a = r.flip ? r.last : r.first, b = r.flip ? r.first : r.last;
+      return h("span", { class: "rowx sm" }, h("i", { class: "run-dot", style: `background:${runColor(i)}` }),
+        r.name, endpoint(r, a), a !== b && [r.axis === "x" ? "→" : "↓", endpoint(r, b)]);
+    })), note, h("button", { class: "btn xs", onclick: () => editPhysicalMap(this) }, "Arrange runs"));
+  }
+
+  _drawMap() {
+    const map = this._liveMap;
+    if (!map) return;
+    map.pixels = this._live.pixels;
+    if (this._inspect && map.span) map.selectedLed = this._inspectIndex + map.span[0];
+    else if (!this._mapNote.textContent) map.selectedLed = null;
+    map.draw();
   }
 
   _updateInspector() {
@@ -1637,7 +1734,9 @@ class WledBarsPanel extends HTMLElement {
       this._inspectKey = null;
       return;
     }
-    const address = ledAddress(led, this._device, this._settings);
+    const physical = this._liveMap?.span && led + this._liveMap.span[0];
+    const run = physical != null && this._liveMap?.runs.find(r => physical >= r.first && physical <= r.last);
+    const address = (run ? run.name + " · " : "") + ledAddress(led, this._device, this._settings);
     const { owner, layers } = inspectLed(led, this._bars, live, (b, i) => this._statusOf(b, i).text);
     const hex = owner === null ? null : "#" + live.pixels[led].map(c => c.toString(16).padStart(2, "0")).join("").toUpperCase();
     const key = JSON.stringify([address, layers, hex, live.online]);
@@ -2057,21 +2156,25 @@ class WledBarsPanel extends HTMLElement {
             refit ? `${here.name} is ${here.led_count} LEDs long, so the bars are fitted to its length.` : ""].filter(Boolean).join(" ")),
         file.settings && h("label", { class: "rowx sm", style: "padding:10px 16px 0;flex-wrap:nowrap;align-items:flex-start" },
           h("input", { type: "checkbox", checked: withSettings, onchange: (e) => { withSettings = e.target.checked; } }),
-          h("span", {}, "Also load the device settings", h("div", { class: "dim" }, "Brightness, night dimming and how frames are sent. The WLED segment stays as it is."))),
+          h("span", {}, "Also load the device settings", h("div", { class: "dim" },
+            "Includes brightness, output settings, saved layouts and the physical map. Keeps the selected WLED segment.",
+            file.settings.map_runs?.some?.(r => r?.last >= physicalCount(here)) && " This map exceeds the strip length, so the current map will be kept."))),
         h("div", { class: "rowx", style: "padding:14px 16px 16px;justify-content:flex-end" },
           h("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
           h("button", { class: "btn pri", onclick: async () => {
             if (busy) return;
             busy = true;
             const keep = mode === "add" ? base.bars : [];
-            const settings = withSettings ? { ...file.settings, segment: base.settings.segment } : base.settings;
-            const count = addressableLeds(here, settings);
-            const changes = { bars: keep.concat(adoptBars(file.bars, keep, file.led_count, count)) };
-            if (withSettings) changes.settings = settings;
-            const saved = await this._saveEdit(changes, base, `Loaded ${n} bar${n === 1 ? "" : "s"} from the file`);
-            busy = false;
-            dlg.close();
-            if (saved) this._render();
+            try {
+              const settings = withSettings ? { ...base.settings, ...file.settings, segment: base.settings.segment } : base.settings;
+              const adopted = adoptBars(file.bars, keep, file.led_count, addressableLeds(here, settings));
+              const changes = n ? { bars: keep.concat(adopted) } : {};
+              if (withSettings) changes.settings = importedSettings(file, base, adopted, mode === "add");
+              const saved = await this._saveEdit(changes, base, `Loaded ${n} bar${n === 1 ? "" : "s"} from the file`);
+              dlg.close();
+              if (saved) this._render();
+            } catch (err) { dlg.close(); this._toast(err.message); }
+            finally { busy = false; }
           } }, mode === "replace" && this._bars.length ? "Replace" : "Load")));
     };
     dlg.addEventListener("close", () => dlg.remove());
@@ -3502,7 +3605,7 @@ class WledBarsPanel extends HTMLElement {
         if (this.shadowRoot.activeElement !== this._inspectInput) this._inspectInput.value = this._inspectIndex;
         this._updateInspector();
       }
-      this._liveStrip.draw();
+      if (this._mapView) this._drawMap(); else this._liveStrip.draw();
       if (this._offlineEl) this._offlineEl.style.display = this._live.online ? "none" : "";
       for (const strip of this._strips) {
         if (!strip.barRef) continue;

@@ -4,7 +4,7 @@ Progress bars and status gauges on a WLED strip, set up visually inside Home Ass
 
 Drag across a picture of your strip to place a bar, point it at a sensor, timer or finish time, and style it with a live animated preview. No YAML, and no WLED segments to prepare.
 
-> **Status: early build (0.9.0).** In use on real hardware. Tests cover the render engine, frame logic and editor. The Home Assistant entity tests use stubs. See [Testing](#testing).
+> **Status: early build (0.10.0).** In use on real hardware. Tests cover the render engine, frame logic and editor. The Home Assistant entity tests use stubs. See [Testing](#testing).
 
 ## What a bar can do
 
@@ -37,6 +37,8 @@ Requires Home Assistant 2024.8 or newer and WLED 0.13 or newer.
 ## Using it
 
 - **Strip overview.** Each bar has a coloured line beneath its LEDs, labelled with its name and direction. Overlapping lines or names stack in card order. Click or tap a line or name to edit that bar, even when it is switched off or waiting for its schedule. The placement editor stacks the other bars’ names the same way while you drag the selected range.
+- **Named layouts.** Choose *Manage layouts*, name a layout, tick the bars it should enable, and order them from back to front. Choose it under *Active layout* or activate its scene in a Home Assistant dashboard or automation. Layouts share each bar’s sensor, appearance and schedule. Bars added after a layout was saved switch off when that layout is activated. Changing the active switches or order by hand shows *Custom arrangement*. Renaming a layout keeps its scene entity ID.
+- **Physical strip map.** Choose *Physical map* for a live view arranged by WLED segment. Select an LED or a numbered endpoint to open *Inspect LED*. Under *Arrange runs* you can name, split, move, rotate and flip straight runs to match the installation. Drag a run or enter its horizontal and vertical position. The map uses physical LED numbers across the whole device. In JSON mode, a mapped LED on the selected linear segment also shows its segment-relative number. Choose *Use WLED segments* and save to return to the automatic map.
 - **Show bars underneath.** Open the upper bar’s *Unfilled LEDs* extra and choose *Show bars underneath*. Its empty LEDs reveal the next bar in the stack. Filled LEDs, scale marks, lit tips and whole-bar alerts still take priority. For example, a short red progress bar can run over a full blue background bar.
 - **Inspect LED.** In the strip overview, turn on *Inspect LED* and tap a dot or enter its number. The inspector shows the colour WLED Bars sends, which bar supplies it, and why other bars at that position are covered, passing through or hidden. A live draft, identify flash or notification flash appears when it takes over. For ordinary linear JSON segments the inspector gives both the segment LED and its physical strip number.
 - **Saving across tabs.** Undo applies to the strip where the edit was made. Independent changes are combined. If two editors change the same field differently, the second editor keeps its draft and asks you to review the saved version.
@@ -167,7 +169,7 @@ tests/                 engine tests, Python/JS parity, manager vs. fake WLED
 
 ## Testing
 
-`node --test tests/strip-labels.mjs tests/config-edits.mjs tests/led-inspect.mjs` checks strip labels at desktop and phone widths, editing from multiple panels, LED ownership and segment addressing.
+`node --test tests/strip-labels.mjs tests/config-edits.mjs tests/led-inspect.mjs tests/arrangements.mjs` checks strip labels at desktop and phone widths, editing from multiple panels, LED ownership, layout imports and map coordinates.
 
 ```bash
 python3 tests/test_engine.py
@@ -191,4 +193,4 @@ Then open `http://localhost:8765/demo/` to try the editor without Home Assistant
 
 ## Not done yet
 
-- 2D matrix layouts, translations other than English.
+- Native WLED matrix addressing and translations beyond English.
